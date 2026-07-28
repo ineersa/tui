@@ -22,6 +22,7 @@ use League\CommonMark\Extension\CommonMark\Node\Block\ListItem;
 use League\CommonMark\Extension\CommonMark\Node\Block\ThematicBreak;
 use League\CommonMark\Extension\CommonMark\Node\Inline\Code;
 use League\CommonMark\Extension\CommonMark\Node\Inline\Emphasis;
+use League\CommonMark\Extension\CommonMark\Node\Inline\HtmlInline;
 use League\CommonMark\Extension\CommonMark\Node\Inline\Link;
 use League\CommonMark\Extension\CommonMark\Node\Inline\Strong;
 use League\CommonMark\Extension\GithubFlavoredMarkdownExtension;
@@ -550,6 +551,7 @@ class MarkdownWidget extends AbstractWidget
     {
         return match (true) {
             $node instanceof Text => $node->getLiteral(),
+            $node instanceof HtmlInline => $node->getLiteral(),
             $node instanceof Strong => $this->resolveElement('bold')->apply($this->renderInlineNodes($node)).$this->restoreContext,
             $node instanceof Emphasis => $this->resolveElement('italic')->apply($this->renderInlineNodes($node)).$this->restoreContext,
             $node instanceof Strikethrough => $this->resolveElement('strikethrough')->apply($this->renderInlineNodes($node)).$this->restoreContext,
