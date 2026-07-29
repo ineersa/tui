@@ -143,7 +143,7 @@ class MarkdownTest extends TestCase
         $this->assertStringContainsString('World', $lines2[0]);
     }
 
-    public function testRenderInlineHtmlLiterally()
+    public function testRenderInlineHtmlAsCode()
     {
         $md = $this->createMarkdown('Hello <b>world</b> test');
         $lines = $md->render(new RenderContext(60, 24));
@@ -153,12 +153,13 @@ class MarkdownTest extends TestCase
         $this->assertStringContainsString('</b>', $content);
         $this->assertStringContainsString('world', $content);
 
-        $md = $this->createMarkdown('Can you check <system-reminder>?');
-        $lines = $md->render(new RenderContext(60, 24));
+        $raw = $this->createMarkdown('Can you check <system-reminder>?');
+        $code = $this->createMarkdown('Can you check `<system-reminder>`?');
 
-        $content = implode('', $lines);
-        $this->assertStringContainsString('<system-reminder>', $content);
-        $this->assertStringContainsString('Can you check', $content);
+        $this->assertSame(
+            implode('', $code->render(new RenderContext(60, 24))),
+            implode('', $raw->render(new RenderContext(60, 24))),
+        );
     }
 
     public function testLongLinesAreWrapped()

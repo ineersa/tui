@@ -551,7 +551,7 @@ class MarkdownWidget extends AbstractWidget
     {
         return match (true) {
             $node instanceof Text => $node->getLiteral(),
-            $node instanceof HtmlInline => $node->getLiteral(),
+            $node instanceof HtmlInline => $this->resolveElement('code')->apply($node->getLiteral()).$this->restoreContext,
             $node instanceof Strong => $this->resolveElement('bold')->apply($this->renderInlineNodes($node)).$this->restoreContext,
             $node instanceof Emphasis => $this->resolveElement('italic')->apply($this->renderInlineNodes($node)).$this->restoreContext,
             $node instanceof Strikethrough => $this->resolveElement('strikethrough')->apply($this->renderInlineNodes($node)).$this->restoreContext,
