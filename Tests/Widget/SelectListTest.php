@@ -20,6 +20,7 @@ use Symfony\Component\Tui\Event\SelectEvent;
 use Symfony\Component\Tui\Event\SelectionChangeEvent;
 use Symfony\Component\Tui\Event\SelectionToggleEvent;
 use Symfony\Component\Tui\Render\RenderContext;
+use Symfony\Component\Tui\Style\Style;
 use Symfony\Component\Tui\Terminal\VirtualTerminal;
 use Symfony\Component\Tui\Tui;
 use Symfony\Component\Tui\Widget\SelectListWidget;
@@ -410,9 +411,222 @@ class SelectListTest extends TestCase
         }
     }
 
+    public function testCompactItemsStayOnOneRowWhenColumnsFit()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'd', 'label' => 'Development', 'description' => 'Local development server'],
+            ['value' => 'p', 'label' => 'Production', 'description' => 'Public production server'],
+            ['value' => 'n', 'label' => 'Normal', 'description' => 'Normal'],
+        ]);
+
+        $lines = $list->render(new RenderContext(60, 10));
+
+        $this->assertCount(3, $lines);
+        $this->assertSame('→ Development  Local development server', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertSame('  Production   Public production server', AnsiUtils::stripAnsiCodes($lines[1]));
+        $this->assertSame('  Normal       Normal', AnsiUtils::stripAnsiCodes($lines[2]));
+        $this->assertSame(
+            [
+                (new Style())->withBold()->apply('→ Development  Local development server'),
+                '  Production   '.(new Style())->withColor('gray')->apply('Public production server'),
+                '  Normal       '.(new Style())->withColor('gray')->apply('Normal'),
+            ],
+            $lines,
+        );
+    }
+
+    public function testLongLabelWrapsWithinLabelColumnBesideDescription()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha beta gamma delta epsilon zeta', 'description' => 'Public production server'],
+            ['value' => 'n', 'label' => 'Normal option', 'description' => 'Normal'],
+        ]);
+
+        $lines = $list->render(new RenderContext(80, 10));
+
+        $this->assertSame('→ alpha beta gamma delta epsilon  Public production server', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertSame('  zeta', AnsiUtils::stripAnsiCodes($lines[1]));
+        $this->assertSame('  Normal option                   Normal', AnsiUtils::stripAnsiCodes($lines[2]));
+        $this->assertSame((new Style())->withBold()->apply('→ alpha beta gamma delta epsilon  Public production server'), $lines[0]);
+        $this->assertSame((new Style())->withBold()->apply('  zeta'), $lines[1]);
+    }
+
+    public function testLongDescriptionWrapsUnderDescriptionColumn()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'd', 'label' => 'Development', 'description' => 'Local development server is long'],
+            ['value' => 'p', 'label' => 'Production is long', 'description' => 'Public production server'],
+            ['value' => 'n', 'label' => 'Normal', 'description' => 'Normal'],
+        ]);
+
+        $lines = $list->render(new RenderContext(48, 10));
+
+        $this->assertSame('→ Development         Local development server', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertSame('                      is long', AnsiUtils::stripAnsiCodes($lines[1]));
+        $this->assertSame('  Production is long  Public production server', AnsiUtils::stripAnsiCodes($lines[2]));
+        $this->assertSame('  Normal              Normal', AnsiUtils::stripAnsiCodes($lines[3]));
+        $this->assertStringNotContainsString('(1/', AnsiUtils::stripAnsiCodes(implode("\n", $lines)));
+    }
+
+    public function testLabelOnlyListWrapsAcrossAvailableWidth()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'v', 'label' => 'alpha beta gamma delta epsilon zeta'],
+        ]);
+
+        $lines = $list->render(new RenderContext(30, 10));
+
+        $this->assertCount(2, $lines);
+        $this->assertSame('→ alpha beta gamma delta', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertSame('  epsilon zeta', AnsiUtils::stripAnsiCodes($lines[1]));
+        $this->assertSame(
+            [
+                (new Style())->withBold()->apply('→ alpha beta gamma delta'),
+                (new Style())->withBold()->apply('  epsilon zeta'),
+            ],
+            $lines,
+        );
+    }
+
+    public function testWrappedItemsStayAdjacentWithoutBlankRows()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'd', 'label' => 'Development', 'description' => 'Local development server is long'],
+            ['value' => 'p', 'label' => 'Production is long', 'description' => 'Public production server'],
+            ['value' => 'n', 'label' => 'Normal', 'description' => 'Normal'],
+        ]);
+
+        $plain = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(48, 12)));
+
+        $this->assertSame('→ Development         Local development server', $plain[0]);
+        $this->assertSame('                      is long', $plain[1]);
+        $this->assertSame('  Production is long  Public production server', $plain[2]);
+        $this->assertSame('  Normal              Normal', $plain[3]);
+        $this->assertCount(4, $plain);
+    }
+
+    public function testMultiselectWrapsWithAlignedContinuationPrefix()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha beta gamma delta epsilon zeta', 'description' => 'Public production server', 'checked' => true],
+            ['value' => 'n', 'label' => 'Normal option', 'description' => 'Normal'],
+        ], multiselect: true);
+
+        $lines = $list->render(new RenderContext(80, 10));
+        $plain = array_map(AnsiUtils::stripAnsiCodes(...), $lines);
+
+        $this->assertSame('→ [x] alpha beta gamma delta epsilon  Public production server', $plain[0]);
+        $this->assertSame('      zeta', $plain[1]);
+        $this->assertSame('  [ ] Normal option                   Normal', $plain[2]);
+        $this->assertSame((new Style())->withBold()->apply('→ [x] alpha beta gamma delta epsilon  Public production server'), $lines[0]);
+        $this->assertSame((new Style())->withBold()->apply('      zeta'), $lines[1]);
+    }
+
+    public function testWrappedWindowReclaimsTrailingItemsAfterLeadingTrim()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => str_repeat('a', 80)],
+            ['value' => 'b', 'label' => 'sel'],
+            ['value' => 'c', 'label' => 'tail'],
+        ], 3);
+        $list->setSelectedIndex(1);
+
+        $plain = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(30, 5)));
+
+        $this->assertLessThanOrEqual(5, \count($plain));
+        $this->assertSame('→ sel', $plain[0]);
+        $this->assertStringContainsString('tail', $plain[1], 'Trailing items must re-enter the window after leading items are trimmed.');
+        $this->assertStringContainsString('(2/3)', implode("\n", $plain));
+    }
+
+    public function testWrappedWindowDropsItemsPastTheSelectedOneWhenRowsRunOut()
+    {
+        $items = [];
+        for ($i = 1; $i <= 5; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => \sprintf('Item %d ', $i).str_repeat('x', 40)];
+        }
+        $list = new SelectListWidget($items, 5);
+
+        $lines = $list->render(new RenderContext(30, 4));
+
+        // Three wrapped rows for the selected item plus the scroll indicator.
+        $this->assertCount(4, $lines);
+        $this->assertStringContainsString('Item 1', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertStringContainsString('(1/5)', AnsiUtils::stripAnsiCodes($lines[3]));
+    }
+
+    public function testWrappedWindowKeepsSelectedItemInsideAvailableRows()
+    {
+        $items = [];
+        for ($i = 1; $i <= 5; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => \sprintf('Item %d ', $i).str_repeat('word ', 17)];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->setSelectedIndex(2);
+
+        $lines = $list->render(new RenderContext(30, 4));
+
+        $this->assertLessThanOrEqual(4, \count($lines), 'Wrapped rendering must not emit more rows than the context provides.');
+        $visible = implode("\n", array_map(AnsiUtils::stripAnsiCodes(...), $lines));
+        $this->assertStringContainsString('→ Item 3', $visible, 'The selected item must stay visible inside the available rows.');
+    }
+
+    public function testWrappedWindowClampsSelectedItemTallerThanViewport()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => str_repeat('word ', 20)],
+        ]);
+
+        $lines = $list->render(new RenderContext(30, 3));
+
+        $this->assertLessThanOrEqual(3, \count($lines), 'A selected item taller than the viewport must be clamped to the available rows.');
+        $this->assertStringContainsString('→ word', AnsiUtils::stripAnsiCodes($lines[0]), 'The first row of the clamped selected item stays anchored at the top.');
+    }
+
+    public function testExactFitDoesNotShowScrollIndicator()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha'],
+            ['value' => 'b', 'label' => 'beta'],
+        ]);
+
+        $lines = $list->render(new RenderContext(20, 2));
+
+        $this->assertCount(2, $lines, 'Both items fit the two available rows exactly; nothing is left to scroll.');
+        $this->assertStringContainsString('alpha', AnsiUtils::stripAnsiCodes($lines[0]));
+        $this->assertStringContainsString('beta', AnsiUtils::stripAnsiCodes($lines[1]));
+    }
+
+    public function testOneRowViewportShowsOnlyTheSelectedLabel()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha'],
+            ['value' => 'b', 'label' => 'beta'],
+        ]);
+
+        $lines = $list->render(new RenderContext(20, 1));
+
+        $this->assertCount(1, $lines, 'A one-row viewport renders exactly one row.');
+        $this->assertStringContainsString('→ alpha', AnsiUtils::stripAnsiCodes($lines[0]), 'The selected label keeps the row; the indicator is suppressed.');
+    }
+
+    public function testWrappedRowsFitEveryWidth()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha beta gamma ★ étoile verified', 'description' => 'the first one'],
+            ['value' => 'b', 'label' => '日本語のオプション with CJK and ascii mixed', 'description' => 'the second one'],
+        ]);
+
+        foreach ([60, 40, 20, 6, 4, 2, 1] as $columns) {
+            foreach ($list->render(new RenderContext($columns, 24)) as $line) {
+                $this->assertLessThanOrEqual($columns, AnsiUtils::visibleWidth($line), \sprintf('Every wrapped row fits in %d columns.', $columns));
+            }
+        }
+    }
+
     /**
      * The selected row is prefixed with an arrow: three bytes, two columns.
-     * Budgeting in bytes cost that row two columns of description.
+     * Budgeting in bytes would cost that row two columns of description.
      */
     public function testSelectedRowGetsTheSameWidthBudgetAsTheOthers()
     {
@@ -422,12 +636,17 @@ class SelectListTest extends TestCase
             ['value' => 'beta', 'label' => 'beta', 'description' => $description],
         ]);
 
-        $lines = $list->render(new RenderContext(60, 24));
+        $list->setSelectedIndex(0);
+        $selected = $list->render(new RenderContext(60, 24));
+        $list->setSelectedIndex(1);
+        $unselected = $list->render(new RenderContext(60, 24));
 
+        $this->assertStringContainsString('→ alpha', AnsiUtils::stripAnsiCodes($selected[0]));
+        $this->assertStringContainsString('  alpha', AnsiUtils::stripAnsiCodes($unselected[0]));
         $this->assertSame(
-            AnsiUtils::visibleWidth($lines[1]),
-            AnsiUtils::visibleWidth($lines[0]),
-            'The selected row is truncated to the same width as the others.',
+            AnsiUtils::visibleWidth($unselected[0]),
+            AnsiUtils::visibleWidth($selected[0]),
+            'The selected first row is budgeted to the same width as the unselected first row of the same item.',
         );
     }
 
@@ -439,11 +658,17 @@ class SelectListTest extends TestCase
             ['value' => 'beta', 'label' => $label],
         ]);
 
-        $lines = $list->render(new RenderContext(60, 24));
+        $list->setSelectedIndex(0);
+        $selected = $list->render(new RenderContext(60, 24));
+        $list->setSelectedIndex(1);
+        $unselected = $list->render(new RenderContext(60, 24));
 
+        $this->assertStringStartsWith('→ ', AnsiUtils::stripAnsiCodes($selected[0]));
+        $this->assertStringStartsWith('  ', AnsiUtils::stripAnsiCodes($unselected[0]));
         $this->assertSame(
-            AnsiUtils::visibleWidth($lines[1]),
-            AnsiUtils::visibleWidth($lines[0]),
+            AnsiUtils::visibleWidth($unselected[0]),
+            AnsiUtils::visibleWidth($selected[0]),
+            'The selected first row is budgeted to the same width as the unselected first row of the same item.',
         );
     }
 

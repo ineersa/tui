@@ -12,6 +12,7 @@
 namespace Symfony\Component\Tui\Widget;
 
 use Symfony\Component\Tui\Ansi\AnsiUtils;
+use Symfony\Component\Tui\Ansi\TextWrapper;
 use Symfony\Component\Tui\Event\CancelEvent;
 use Symfony\Component\Tui\Event\MultiSelectEvent;
 use Symfony\Component\Tui\Event\SelectEvent;
@@ -289,19 +290,12 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface
         $labelColumnWidth = min(30, $maxLabelWidth);
 
         // Render visible items
-        for ($i = $startIndex; $i < $endIndex; ++$i) {
-            $item = $this->getFilteredItem($i);
-            $isSelected = $i === $this->selectedIndex;
-            $description = isset($item['description']) ? $this->normalizeDescription($item['description']) : null;
-            $line = $this->renderItem($item, $isSelected, $description, $columns, $labelColumnWidth);
-            // renderItem() budgets the label against the columns left after
-            // its prefix, but the prefix itself is emitted unconditionally
-            // and is wider than the widget once the pane gets narrow enough.
-            $lines[] = AnsiUtils::truncateToWidth($line, $columns, '');
-        }
+        // Items may wrap across several physical rows, so fit the logical
+        // window against the context rows before emitting anything.
+        [$lines, $startIndex, $endIndex, $indicatorRoom] = $this->renderWindow($startIndex, $endIndex, $context->getRows(), $columns, $labelColumnWidth);
 
         // Add scroll indicator if needed
-        if ($startIndex > 0 || $endIndex < \count($this->filteredItemIndices)) {
+        if ($indicatorRoom && ($startIndex > 0 || $endIndex < \count($this->filteredItemIndices))) {
             $scrollText = \sprintf('  (%d/%d)', $this->selectedIndex + 1, \count($this->filteredItemIndices));
             $line = $this->applyElement('scroll-info', AnsiUtils::truncateToWidth($scrollText, $columns - 2, ''));
             $lines[] = $line;
@@ -363,65 +357,158 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface
     }
 
     /**
-     * @param array{value: string, label: string, description?: string, checked?: bool} $item
+     * Render the logical window as physical rows fitted to the context.
+     *
+     * Wrapped items consume a variable number of rows, so trailing items
+     * are dropped and leading items are trimmed until the selected item
+     * fits inside the budget; a selected item taller than the budget is
+     * clamped to its first rows. One row is reserved for the scroll
+     * indicator only when items actually fall outside the fitted window,
+     * so a window that fits exactly renders without an indicator.
+     *
+     * A one-row viewport has no room next to the selection, so the
+     * indicator is suppressed and its row goes to the selected label.
+     *
+     * @return array{0: list<string>, 1: int, 2: int, 3: bool} the rendered rows, the fitted [start, end) range and whether a row is left for the indicator
      */
-    private function renderItem(array $item, bool $isSelected, ?string $description, int $columns, int $labelColumnWidth): string
+    private function renderWindow(int $startIndex, int $endIndex, int $contextRows, int $columns, int $labelColumnWidth): array
     {
-        $displayValue = $item['label'];
-        $checkbox = $this->multiselect ? (($item['checked'] ?? false) ? '[x] ' : '[ ] ') : '';
-        $alignedWidth = $labelColumnWidth + 2;
+        $rowsByIndex = [];
+        for ($i = $startIndex; $i < $endIndex; ++$i) {
+            $item = $this->getFilteredItem($i);
+            $description = isset($item['description']) ? $this->normalizeDescription($item['description']) : null;
+            $rowsByIndex[$i] = $this->renderItemRows($item, $i === $this->selectedIndex, $description, $columns, $labelColumnWidth);
+        }
 
-        if ($isSelected) {
-            $prefix = '→ '.$checkbox;
-            // The arrow is three bytes wide and one column wide; every
-            // budget here is in columns.
-            $prefixWidth = AnsiUtils::visibleWidth($prefix);
-            $selectedStyle = $this->resolveElement('selected');
+        $total = \count($this->filteredItemIndices);
 
-            if (null !== $description && $columns > 40) {
-                $maxValueColumns = min($labelColumnWidth, $columns - $prefixWidth - 4);
-                $truncatedValue = AnsiUtils::truncateToWidth($displayValue, $maxValueColumns, '');
-                $spacing = str_repeat(' ', max(1, $alignedWidth - AnsiUtils::visibleWidth($truncatedValue)));
-
-                $descriptionStart = $prefixWidth + AnsiUtils::visibleWidth($truncatedValue) + \strlen($spacing);
-                $remainingColumns = $columns - $descriptionStart - 2;
-
-                if ($remainingColumns > 10) {
-                    $truncatedDesc = AnsiUtils::truncateToWidth($description, $remainingColumns, '');
-
-                    return $selectedStyle->apply("→ {$checkbox}{$truncatedValue}{$spacing}{$truncatedDesc}");
+        $fit = function (int $budget) use ($rowsByIndex, $startIndex, $endIndex): array {
+            // Keep every item through the selection first, then drop trailing
+            // items once the budget is spent.
+            $end = $endIndex;
+            $used = 0;
+            foreach ($rowsByIndex as $i => $rows) {
+                if ($i > $this->selectedIndex && $used + \count($rows) > $budget) {
+                    $end = $i;
+                    break;
                 }
+                $used += \count($rows);
             }
 
-            $maxColumns = $columns - $prefixWidth - 2;
+            // Trim leading items while they push the selection out of view.
+            $start = $startIndex;
+            while ($start < $this->selectedIndex && $used > $budget) {
+                $used -= \count($rowsByIndex[$start]);
+                ++$start;
+            }
 
-            return $selectedStyle->apply($prefix.AnsiUtils::truncateToWidth($displayValue, $maxColumns, ''));
+            // After reclaiming rows from leading items, try trailing items
+            // that were dropped before that trim.
+            while ($end < $endIndex && $used + \count($rowsByIndex[$end]) <= $budget) {
+                $used += \count($rowsByIndex[$end]);
+                ++$end;
+            }
+
+            // The selected item alone exceeds the budget: clamp it to its
+            // first rows so the arrow and the label start stay visible.
+            $clamp = max(0, $used - $budget);
+
+            return [$start, $end, $clamp];
+        };
+
+        [$start, $end, $clamp] = $fit(max(1, $contextRows));
+        $indicatorRoom = $contextRows >= 2;
+        if ($indicatorRoom && ($start > 0 || $end < $total)) {
+            // Something scrolled out, so one row goes to the indicator.
+            [$start, $end, $clamp] = $fit(max(1, $contextRows - 1));
         }
 
-        // Non-selected item
-        $prefix = '  '.$checkbox;
+        $lines = [];
+        for ($i = $start; $i < $end; ++$i) {
+            $rows = $rowsByIndex[$i];
+            if ($i === $start && $clamp > 0) {
+                $rows = \array_slice($rows, 0, \count($rows) - $clamp);
+            }
+            // The prefix is wider than very narrow widgets, so clamp every
+            // physical row to the pane width.
+            foreach ($rows as $row) {
+                $lines[] = AnsiUtils::truncateToWidth($row, $columns, '');
+            }
+        }
+
+        return [$lines, $start, $end, $indicatorRoom];
+    }
+
+    /**
+     * Render one item with label and description wrapped independently in
+     * their side-by-side columns. Continuation rows keep the arrow only on
+     * the first physical row and align under each column.
+     *
+     * @param array{value: string, label: string, description?: string, checked?: bool} $item
+     *
+     * @return list<string>
+     */
+    private function renderItemRows(array $item, bool $isSelected, ?string $description, int $columns, int $labelColumnWidth): array
+    {
+        $checkbox = $this->multiselect ? (($item['checked'] ?? false) ? '[x] ' : '[ ] ') : '';
+        $prefix = $isSelected ? '→ '.$checkbox : '  '.$checkbox;
         $prefixWidth = AnsiUtils::visibleWidth($prefix);
+        $selectedStyle = $isSelected ? $this->resolveElement('selected') : null;
 
-        if (null !== $description && $columns > 40) {
-            $maxValueColumns = min($labelColumnWidth, $columns - $prefixWidth - 4);
-            $truncatedValue = AnsiUtils::truncateToWidth($displayValue, $maxValueColumns, '');
-            $spacing = str_repeat(' ', max(1, $alignedWidth - AnsiUtils::visibleWidth($truncatedValue)));
+        // Keep the existing side-by-side layout when there is room for a
+        // description column; otherwise fall back to a full-width label.
+        $showDescription = null !== $description && $columns > 40;
+        $labelWidth = max(1, min($labelColumnWidth, $columns - $prefixWidth - 4));
+        $alignedWidth = $labelWidth + 2;
+        $descriptionStart = $prefixWidth + $alignedWidth;
+        $descriptionWidth = $columns - $descriptionStart - 2;
 
-            $descriptionStart = $prefixWidth + AnsiUtils::visibleWidth($truncatedValue) + \strlen($spacing);
-            $remainingColumns = $columns - $descriptionStart - 2;
-
-            if ($remainingColumns > 10) {
-                $truncatedDesc = AnsiUtils::truncateToWidth($description, $remainingColumns, '');
-                $labelText = $this->applyElement('label', $truncatedValue);
-                $descText = $this->applyElement('description', $spacing.$truncatedDesc);
-
-                return $prefix.$labelText.$descText;
+        if (!$showDescription || $descriptionWidth <= 10) {
+            $labelWidth = max(1, $columns - $prefixWidth - 2);
+            $labelRows = TextWrapper::wrapTextWithAnsi($item['label'], $labelWidth);
+            $rows = [];
+            foreach ($labelRows as $i => $labelRow) {
+                $row = (0 === $i ? $prefix : str_repeat(' ', $prefixWidth)).$labelRow;
+                $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : $row;
             }
+
+            return $rows;
         }
 
-        $maxColumns = $columns - $prefixWidth - 2;
+        $labelRows = TextWrapper::wrapTextWithAnsi($item['label'], $labelWidth);
+        $descriptionRows = TextWrapper::wrapTextWithAnsi($description, max(1, $descriptionWidth));
+        $rowCount = max(\count($labelRows), \count($descriptionRows));
+        $rows = [];
 
-        return $prefix.AnsiUtils::truncateToWidth($displayValue, $maxColumns, '');
+        for ($i = 0; $i < $rowCount; ++$i) {
+            $labelRow = $labelRows[$i] ?? '';
+            $descriptionRow = $descriptionRows[$i] ?? '';
+            $rowPrefix = 0 === $i ? $prefix : str_repeat(' ', $prefixWidth);
+
+            if ('' === $descriptionRow) {
+                $row = $rowPrefix.$labelRow;
+                $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : ('' !== $labelRow ? $rowPrefix.$this->applyElement('label', $labelRow) : $rowPrefix);
+
+                continue;
+            }
+
+            // Pad to the shared label column so descriptions stay aligned
+            // across items, matching the previous single-row layout.
+            $labelPadding = str_repeat(' ', max(1, $alignedWidth - AnsiUtils::visibleWidth($labelRow)));
+
+            if (null !== $selectedStyle) {
+                $rows[] = $selectedStyle->apply($rowPrefix.$labelRow.$labelPadding.$descriptionRow);
+
+                continue;
+            }
+
+            $labelText = '' !== $labelRow ? $this->applyElement('label', $labelRow) : '';
+            // Keep the inter-column gap outside the description style so the
+            // gray color does not paint the alignment spaces.
+            $rows[] = $rowPrefix.$labelText.$labelPadding.$this->applyElement('description', $descriptionRow);
+        }
+
+        return $rows;
     }
 
     private function resetFilteredItems(): void
