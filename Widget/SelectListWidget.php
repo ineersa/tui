@@ -53,6 +53,8 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
     private bool $verticallyExpanded = true;
     private int $lastWindowStart = 0;
     private int $lastWindowEnd = 0;
+    private int $lastRenderColumns = 0;
+    private int $lastRenderRows = 0;
 
     /**
      * @param list<array{value: string, label: string, description?: string, checked?: bool}> $items
@@ -97,6 +99,7 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
         $this->items = $items;
         $this->resetFilteredItems();
         $this->selectedIndex = 0;
+        $this->invalidateFittedWindow();
         $this->invalidate();
 
         return $this;
@@ -117,6 +120,7 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
         if ($filteredItemIndices !== $this->filteredItemIndices) {
             $this->filteredItemIndices = $filteredItemIndices;
             $this->selectedIndex = 0;
+            $this->invalidateFittedWindow();
             $this->invalidate();
         }
 
@@ -285,6 +289,8 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
     public function render(RenderContext $context): array
     {
         $columns = $context->getColumns();
+        $this->lastRenderColumns = max(1, $columns);
+        $this->lastRenderRows = max(1, $context->getRows());
         $lines = [];
 
         // No items match filter
@@ -553,12 +559,14 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             return 0;
         }
 
+        $this->ensureFittedWindow();
+
         if ($this->lastWindowEnd > $this->lastWindowStart) {
             if ($direction > 0) {
                 return min($last, $this->lastWindowEnd);
             }
 
-            return max(0, $this->lastWindowStart - 1);
+            return max(0, min($last, $this->lastWindowStart - 1));
         }
 
         $step = max(1, $this->maxVisible);
@@ -567,6 +575,71 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
         }
 
         return max(0, $this->selectedIndex - $step);
+    }
+
+    /**
+     * Drop cached fitted-window bounds so the next page action must rebuild
+     * them for the current items and selection.
+     */
+    private function invalidateFittedWindow(): void
+    {
+        $this->lastWindowStart = 0;
+        $this->lastWindowEnd = 0;
+    }
+
+    /**
+     * Rebuild fitted window bounds from the last rendered viewport when the
+     * cache is missing or no longer covers the current selection. Reuses the
+     * same renderWindow() fitter as paint.
+     */
+    private function ensureFittedWindow(): void
+    {
+        $total = \count($this->filteredItemIndices);
+        if ($total <= 0) {
+            $this->invalidateFittedWindow();
+
+            return;
+        }
+
+        $this->selectedIndex = max(0, min($this->selectedIndex, $total - 1));
+
+        $cacheValid = $this->lastWindowEnd > $this->lastWindowStart
+            && $this->lastWindowStart >= 0
+            && $this->lastWindowEnd <= $total
+            && $this->selectedIndex >= $this->lastWindowStart
+            && $this->selectedIndex < $this->lastWindowEnd
+            && $this->lastRenderColumns > 0
+            && $this->lastRenderRows > 0;
+
+        if ($cacheValid) {
+            return;
+        }
+
+        if ($this->lastRenderColumns <= 0 || $this->lastRenderRows <= 0) {
+            $this->invalidateFittedWindow();
+
+            return;
+        }
+
+        $columns = $this->lastRenderColumns;
+        $startIndex = max(
+            0,
+            min(
+                $this->selectedIndex - (int) floor($this->maxVisible / 2),
+                $total - $this->maxVisible,
+            ),
+        );
+        $endIndex = min($startIndex + $this->maxVisible, $total);
+
+        $maxLabelWidth = 0;
+        for ($i = $startIndex; $i < $endIndex; ++$i) {
+            $maxLabelWidth = max($maxLabelWidth, AnsiUtils::visibleWidth($this->getFilteredItem($i)['label']));
+        }
+        $labelColumnWidth = min(30, $maxLabelWidth);
+
+        [, $startIndex, $endIndex] = $this->renderWindow($startIndex, $endIndex, $this->lastRenderRows, $columns, $labelColumnWidth);
+        $this->lastWindowStart = $startIndex;
+        $this->lastWindowEnd = $endIndex;
     }
 
     /**

@@ -636,7 +636,6 @@ class TuiTest extends TestCase
         $tui->stop();
     }
 
-
     public function testNonExpandedSelectListOverflowKeepsSelectedArrowVisible()
     {
         $terminal = new VirtualTerminal(40, 8);

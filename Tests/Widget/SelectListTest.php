@@ -15,20 +15,20 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Tui\Ansi\AnsiCodeTracker;
 use Symfony\Component\Tui\Ansi\AnsiUtils;
-use Symfony\Component\Tui\Style\StyleSheet;
-use Symfony\Component\Tui\Style\Direction;
 use Symfony\Component\Tui\Event\CancelEvent;
 use Symfony\Component\Tui\Event\MultiSelectEvent;
 use Symfony\Component\Tui\Event\SelectEvent;
 use Symfony\Component\Tui\Event\SelectionChangeEvent;
 use Symfony\Component\Tui\Event\SelectionToggleEvent;
 use Symfony\Component\Tui\Render\RenderContext;
+use Symfony\Component\Tui\Style\Direction;
 use Symfony\Component\Tui\Style\Style;
+use Symfony\Component\Tui\Style\StyleSheet;
 use Symfony\Component\Tui\Terminal\ScreenBuffer;
 use Symfony\Component\Tui\Terminal\VirtualTerminal;
 use Symfony\Component\Tui\Tui;
-use Symfony\Component\Tui\Widget\SelectListWidget;
 use Symfony\Component\Tui\Widget\ContainerWidget;
+use Symfony\Component\Tui\Widget\SelectListWidget;
 use Symfony\Component\Tui\Widget\TextWidget;
 
 class SelectListTest extends TestCase
@@ -700,7 +700,6 @@ class SelectListTest extends TestCase
         $this->assertSame(['select_confirm' => 'OK'], $labels);
     }
 
-
     public function testPageDownDoesNotSkipUnseenWrappedOptions()
     {
         $items = [];
@@ -819,7 +818,7 @@ class SelectListTest extends TestCase
             $this->assertStringContainsString('→ alpha', $visible[1]);
             $this->assertStringContainsString('beta', $visible[2]);
             $this->assertSame('footer1', $visible[7]);
-            $this->assertSame(['', '', '', ''], array_slice($visible, 3, 4));
+            $this->assertSame(['', '', '', ''], \array_slice($visible, 3, 4));
         } finally {
             $tui->stop();
         }
@@ -871,7 +870,6 @@ class SelectListTest extends TestCase
         $this->assertStringContainsString('36', $activeAtDescription);
         $this->assertStringContainsString('44', $activeAtDescription);
     }
-
 
     public function testSuccessivePageDownDoesNotSkipItemsBeforeTallOption()
     {
@@ -925,7 +923,7 @@ class SelectListTest extends TestCase
             if ('v10' === $list->getSelectedItem()['value']) {
                 $seen[10] = true;
             }
-            $list->handleInput("[5~");
+            $list->handleInput("\x1b[5~");
         }
 
         $this->assertArrayHasKey(10, $seen, 'Successive PageUp from below the tall option must land on or show Item10 instead of jumping over it.');
