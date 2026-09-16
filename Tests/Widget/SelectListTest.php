@@ -15,6 +15,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Tui\Ansi\AnsiCodeTracker;
 use Symfony\Component\Tui\Ansi\AnsiUtils;
+use Symfony\Component\Tui\Style\StyleSheet;
 use Symfony\Component\Tui\Event\CancelEvent;
 use Symfony\Component\Tui\Event\MultiSelectEvent;
 use Symfony\Component\Tui\Event\SelectEvent;
@@ -22,9 +23,11 @@ use Symfony\Component\Tui\Event\SelectionChangeEvent;
 use Symfony\Component\Tui\Event\SelectionToggleEvent;
 use Symfony\Component\Tui\Render\RenderContext;
 use Symfony\Component\Tui\Style\Style;
+use Symfony\Component\Tui\Terminal\ScreenBuffer;
 use Symfony\Component\Tui\Terminal\VirtualTerminal;
 use Symfony\Component\Tui\Tui;
 use Symfony\Component\Tui\Widget\SelectListWidget;
+use Symfony\Component\Tui\Widget\TextWidget;
 
 class SelectListTest extends TestCase
 {
@@ -716,6 +719,155 @@ class SelectListTest extends TestCase
 
         $this->assertStringContainsString('Item2', $visible, 'PageDown must bring the next unseen option into view.');
         $this->assertNotSame('v5', $list->getSelectedItem()['value'], 'PageDown must not jump to an option that was never shown.');
+    }
+
+    public function testPageUpDoesNotSkipUnseenWrappedOptions()
+    {
+        $items = [];
+        for ($i = 0; $i < 10; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => 'Item'.$i.' '.str_repeat('word ', 20)];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->setSelectedIndex(5);
+
+        $before = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $this->assertStringContainsString('→ Item5', implode("\n", $before));
+        $this->assertStringNotContainsString('Item2', implode("\n", $before));
+
+        $list->handleInput("\x1b[5~");
+
+        $after = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $visible = implode("\n", $after);
+
+        $this->assertStringContainsString('Item2', $visible, 'PageUp must bring a previously unseen option into view.');
+        $this->assertNotSame('v0', $list->getSelectedItem()['value'], 'PageUp must not jump over unseen options to the first item.');
+    }
+
+    public function testPageDownInTallViewportStaysWithinMaxVisible()
+    {
+        $items = [];
+        for ($i = 0; $i < 20; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => 'Item'.$i];
+        }
+        $list = new SelectListWidget($items, 5);
+
+        $list->render(new RenderContext(40, 24));
+        $list->handleInput("\x1b[6~");
+
+        $this->assertSame('v5', $list->getSelectedItem()['value']);
+    }
+
+    public function testMixedHeightPageDownAndPageUpKeepAdjacentUnseenItems()
+    {
+        $items = [
+            ['value' => 'v0', 'label' => 'short0'],
+            ['value' => 'v1', 'label' => 'Item1 '.str_repeat('word ', 20)],
+            ['value' => 'v2', 'label' => 'short2'],
+            ['value' => 'v3', 'label' => 'Item3 '.str_repeat('word ', 20)],
+            ['value' => 'v4', 'label' => 'short4'],
+            ['value' => 'v5', 'label' => 'short5'],
+            ['value' => 'v6', 'label' => 'short6'],
+        ];
+        $list = new SelectListWidget($items, 5);
+
+        $before = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $this->assertStringContainsString('→ short0', implode("\n", $before));
+        $this->assertStringContainsString('short2', implode("\n", $before));
+        $this->assertStringNotContainsString('Item3', implode("\n", $before));
+
+        $list->handleInput("\x1b[6~");
+        $afterDown = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $visibleDown = implode("\n", $afterDown);
+
+        $this->assertSame('v3', $list->getSelectedItem()['value']);
+        $this->assertStringContainsString('Item3', $visibleDown);
+        $this->assertStringNotContainsString('→ short0', $visibleDown);
+
+        $list->handleInput("\x1b[5~");
+        $afterUp = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $visibleUp = implode("\n", $afterUp);
+
+        $this->assertSame('v0', $list->getSelectedItem()['value']);
+        $this->assertStringContainsString('→ short0', $visibleUp);
+        $this->assertStringContainsString('short2', $visibleUp);
+    }
+
+    public function testDefaultExpandedSelectListContentStaysCompactOnScreen()
+    {
+        $terminal = new VirtualTerminal(40, 8);
+        $tui = new Tui(terminal: $terminal);
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'alpha'],
+            ['value' => 'b', 'label' => 'beta'],
+        ], maxVisible: 5);
+        $tui->add(new TextWidget('heading1'));
+        $tui->add($list);
+        $tui->add(new TextWidget('footer1'));
+
+        try {
+            $tui->start();
+            $tui->processRender();
+
+            $screen = new ScreenBuffer(40, 8);
+            $screen->write($terminal->getOutput());
+            $visible = array_map(rtrim(...), explode("\n", $screen->getScreen()));
+
+            $this->assertTrue($list->isVerticallyExpanded());
+            $this->assertSame('heading1', $visible[0]);
+            $this->assertStringContainsString('→ alpha', $visible[1]);
+            $this->assertStringContainsString('beta', $visible[2]);
+            $this->assertSame('footer1', $visible[7]);
+            $this->assertSame(['', '', '', ''], array_slice($visible, 3, 4));
+        } finally {
+            $tui->stop();
+        }
+    }
+
+    public function testCustomSelectedStyleIsRestoredAcrossWrappedAnsiLabelBoundary()
+    {
+        $label = "\x1b[31m".'alpha beta gamma delta epsilon zeta eta theta'."\x1b[39;49m";
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => $label, 'description' => 'plain description text here'],
+            ['value' => 'b', 'label' => 'Normal', 'description' => 'Normal'],
+        ]);
+
+        $terminal = new VirtualTerminal(80, 10);
+        $tui = new Tui(terminal: $terminal);
+        $tui->addStyleSheet(new StyleSheet([
+            SelectListWidget::class.'::selected' => (new Style())->withBold()->withColor('cyan')->withBackground('blue'),
+            SelectListWidget::class.'::selected:focus' => (new Style())->withBold()->withColor('cyan')->withBackground('blue'),
+        ]));
+        $tui->add($list);
+
+        try {
+            $tui->start();
+            $lines = $list->render(new RenderContext(80, 10));
+        } finally {
+            $tui->stop();
+        }
+
+        $plain = AnsiUtils::stripAnsiCodes($lines[0]);
+        $descCol = strpos($plain, 'plain');
+        $this->assertNotFalse($descCol);
+
+        $tracker = new AnsiCodeTracker();
+        $activeAtDescription = null;
+        foreach (AnsiUtils::walkCells($lines[0]) as $token) {
+            if (0 === $token['width']) {
+                $tracker->process($token['text']);
+                continue;
+            }
+            if ($token['col'] === $descCol) {
+                $activeAtDescription = $tracker->getActiveCodes();
+                break;
+            }
+        }
+
+        $this->assertNotNull($activeAtDescription);
+        $this->assertStringNotContainsString('31', $activeAtDescription);
+        $this->assertStringContainsString('1', $activeAtDescription);
+        $this->assertStringContainsString('36', $activeAtDescription);
+        $this->assertStringContainsString('44', $activeAtDescription);
     }
 
     /**
