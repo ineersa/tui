@@ -1045,6 +1045,89 @@ class SelectListTest extends TestCase
         );
     }
 
+    public function testPageUpAfterSetItemsWithoutRenderStaysWithinCurrentItems()
+    {
+        $items = [];
+        for ($i = 0; $i < 20; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => 'Item'.$i];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->setSelectedIndex(15);
+        $list->render(new RenderContext(40, 8));
+
+        $list->setItems(\array_slice($items, 0, 2));
+        $list->handleInput("\x1b[5~");
+
+        $this->assertNotNull($list->getSelectedItem());
+        $this->assertSame('v0', $list->getSelectedItem()['value']);
+    }
+
+    public function testPageUpAfterFilterWithoutRenderStaysWithinFilteredItems()
+    {
+        $items = [];
+        for ($i = 0; $i < 20; ++$i) {
+            $items[] = [
+                'value' => $i < 2 ? 'keep'.$i : 'drop'.$i,
+                'label' => 'Item'.$i,
+            ];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->setSelectedIndex(15);
+        $list->render(new RenderContext(40, 8));
+
+        $list->setFilter('keep');
+        $list->handleInput("\x1b[5~");
+
+        $this->assertNotNull($list->getSelectedItem());
+        $this->assertSame('keep0', $list->getSelectedItem()['value']);
+    }
+
+    public function testConsecutivePageDownWithoutRenderAdvancesUsingRefittedWindow()
+    {
+        $items = [];
+        for ($i = 0; $i < 20; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => 'Item'.$i];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->render(new RenderContext(40, 8));
+
+        $list->handleInput("\x1b[6~");
+        $this->assertSame('v5', $list->getSelectedItem()['value']);
+
+        $list->handleInput("\x1b[6~");
+        $this->assertSame('v8', $list->getSelectedItem()['value'], 'A second PageDown before repaint must advance from a refitted window, not reuse the stale end.');
+    }
+
+    public function testBatchedPageDownAroundTallOptionDoesNotSkipNeighbors()
+    {
+        $items = [];
+        for ($i = 0; $i < 15; ++$i) {
+            $items[] = [
+                'value' => 'v'.$i,
+                'label' => 10 === $i ? str_repeat('word ', 40) : 'Item'.$i,
+            ];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->render(new RenderContext(40, 8));
+
+        $selected = [];
+        for ($step = 0; $step < 4; ++$step) {
+            $list->handleInput("\x1b[6~");
+            $selected[] = $list->getSelectedItem()['value'];
+        }
+
+        $this->assertContains('v8', $selected, 'Batched PageDown must select Item8 before jumping around the tall option.');
+        $this->assertNotSame(['v5', 'v5', 'v5', 'v5'], $selected, 'Batched PageDown must keep advancing instead of reusing a stale window end.');
+
+        $indexes = array_map(static fn (string $value): int => (int) substr($value, 1), $selected);
+        for ($i = 1; $i < \count($indexes); ++$i) {
+            $this->assertFalse(
+                $indexes[$i - 1] < 8 && $indexes[$i] > 9,
+                'Batched PageDown must not jump from before Item8 to after Item9 in one step.',
+            );
+        }
+    }
+
     /**
      * @return array{SelectListWidget, Tui}
      */
