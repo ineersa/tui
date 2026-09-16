@@ -16,6 +16,7 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\Tui\Ansi\AnsiCodeTracker;
 use Symfony\Component\Tui\Ansi\AnsiUtils;
 use Symfony\Component\Tui\Style\StyleSheet;
+use Symfony\Component\Tui\Style\Direction;
 use Symfony\Component\Tui\Event\CancelEvent;
 use Symfony\Component\Tui\Event\MultiSelectEvent;
 use Symfony\Component\Tui\Event\SelectEvent;
@@ -27,6 +28,7 @@ use Symfony\Component\Tui\Terminal\ScreenBuffer;
 use Symfony\Component\Tui\Terminal\VirtualTerminal;
 use Symfony\Component\Tui\Tui;
 use Symfony\Component\Tui\Widget\SelectListWidget;
+use Symfony\Component\Tui\Widget\ContainerWidget;
 use Symfony\Component\Tui\Widget\TextWidget;
 
 class SelectListTest extends TestCase
@@ -792,7 +794,7 @@ class SelectListTest extends TestCase
         $this->assertStringContainsString('short2', $visibleUp);
     }
 
-    public function testDefaultExpandedSelectListContentStaysCompactOnScreen()
+    public function testDefaultExpandedSelectListLeavesLayoutPaddingBelowContent()
     {
         $terminal = new VirtualTerminal(40, 8);
         $tui = new Tui(terminal: $terminal);
@@ -868,6 +870,135 @@ class SelectListTest extends TestCase
         $this->assertStringContainsString('1', $activeAtDescription);
         $this->assertStringContainsString('36', $activeAtDescription);
         $this->assertStringContainsString('44', $activeAtDescription);
+    }
+
+
+    public function testSuccessivePageDownDoesNotSkipItemsBeforeTallOption()
+    {
+        $items = [];
+        for ($i = 0; $i < 15; ++$i) {
+            $items[] = [
+                'value' => 'v'.$i,
+                'label' => 10 === $i ? str_repeat('word ', 40) : 'Item'.$i,
+            ];
+        }
+        $list = new SelectListWidget($items, 5);
+        $seen = [];
+
+        for ($step = 0; $step < 3; ++$step) {
+            $lines = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+            foreach ($lines as $line) {
+                if (preg_match('/Item(\d+)/', $line, $match)) {
+                    $seen[(int) $match[1]] = true;
+                }
+            }
+            if ('v10' === $list->getSelectedItem()['value']) {
+                $seen[10] = true;
+            }
+            $list->handleInput("\x1b[6~");
+        }
+
+        $this->assertArrayHasKey(8, $seen, 'Successive PageDown must expose Item8 before the tall Item10 window.');
+        $this->assertArrayHasKey(9, $seen, 'Successive PageDown must expose Item9 before or with the tall Item10 window.');
+    }
+
+    public function testSuccessivePageUpDoesNotSkipTallOption()
+    {
+        $items = [];
+        for ($i = 0; $i < 15; ++$i) {
+            $items[] = [
+                'value' => 'v'.$i,
+                'label' => 10 === $i ? str_repeat('word ', 40) : 'Item'.$i,
+            ];
+        }
+        $list = new SelectListWidget($items, 5);
+        $list->setSelectedIndex(12);
+        $seen = [];
+
+        for ($step = 0; $step < 3; ++$step) {
+            $lines = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+            foreach ($lines as $line) {
+                if (preg_match('/Item(\d+)/', $line, $match)) {
+                    $seen[(int) $match[1]] = true;
+                }
+            }
+            if ('v10' === $list->getSelectedItem()['value']) {
+                $seen[10] = true;
+            }
+            $list->handleInput("[5~");
+        }
+
+        $this->assertArrayHasKey(10, $seen, 'Successive PageUp from below the tall option must land on or show Item10 instead of jumping over it.');
+    }
+
+    public function testLabelOnlyWrappedAnsiDoesNotLeakIntoHorizontalSibling()
+    {
+        $label = "\x1b[31;42m".str_repeat('word ', 20)."\x1b[39;49m";
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => $label],
+            ['value' => 'b', 'label' => 'plain'],
+        ], maxVisible: 5);
+        $right = new TextWidget("RIGHT\nRIGHT\nRIGHT\nRIGHT\nRIGHT\nRIGHT\nRIGHT\nRIGHT");
+        $root = (new ContainerWidget())->setStyle(new Style(direction: Direction::Horizontal));
+        $root->add($list);
+        $root->add($right);
+
+        $terminal = new VirtualTerminal(40, 10);
+        $tui = new Tui(terminal: $terminal);
+        $tui->add($root);
+
+        try {
+            $tui->start();
+            $renderer = (new \ReflectionProperty($tui, 'renderer'))->getValue($tui);
+            $frame = $renderer->renderFrame($root, 40, 10)->toArray();
+        } finally {
+            $tui->stop();
+        }
+
+        $leakedRows = 0;
+        foreach ($frame as $line) {
+            $plain = AnsiUtils::stripAnsiCodes($line);
+            if (!str_contains($plain, 'RIGHT')) {
+                continue;
+            }
+            $tracker = new AnsiCodeTracker();
+            $activeAtSibling = null;
+            foreach (AnsiUtils::walkCells($line) as $token) {
+                if (0 === $token['width']) {
+                    $tracker->process($token['text']);
+                    continue;
+                }
+                if (20 === $token['col']) {
+                    $activeAtSibling = $tracker->getActiveCodes();
+                    break;
+                }
+            }
+            if (null !== $activeAtSibling && (str_contains($activeAtSibling, '31') || str_contains($activeAtSibling, '42'))) {
+                ++$leakedRows;
+            }
+        }
+
+        $this->assertSame(0, $leakedRows, 'Label-only wrapped ANSI must not leak into the right-hand sibling pane.');
+    }
+
+    public function testDescriptionOnlyContinuationRowsCloseFieldLocalAnsi()
+    {
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => 'short', 'description' => "\x1b[31m".str_repeat('desc ', 20)."\x1b[39m"],
+        ], maxVisible: 5);
+
+        $lines = $list->render(new RenderContext(80, 10));
+        $this->assertGreaterThan(1, \count($lines));
+
+        foreach ($lines as $index => $line) {
+            $tracker = new AnsiCodeTracker();
+            $tracker->processText($line);
+            $this->assertSame(
+                '',
+                $tracker->getActiveCodes(),
+                \sprintf('Physical row %d must close description field styles before the line ends.', $index),
+            );
+        }
     }
 
     /**
