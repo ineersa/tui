@@ -13,6 +13,7 @@ namespace Symfony\Component\Tui\Tests\Widget;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Tui\Ansi\AnsiCodeTracker;
 use Symfony\Component\Tui\Ansi\AnsiUtils;
 use Symfony\Component\Tui\Event\CancelEvent;
 use Symfony\Component\Tui\Event\MultiSelectEvent;
@@ -692,6 +693,73 @@ class SelectListTest extends TestCase
         $labels = $this->createTestList()->setKeybindingLabels(['select_confirm' => 'OK'])->getKeybindingLabels();
 
         $this->assertSame(['select_confirm' => 'OK'], $labels);
+    }
+
+
+    public function testPageDownDoesNotSkipUnseenWrappedOptions()
+    {
+        $items = [];
+        for ($i = 0; $i < 10; ++$i) {
+            $items[] = ['value' => 'v'.$i, 'label' => 'Item'.$i.' '.str_repeat('word ', 20)];
+        }
+        $list = new SelectListWidget($items, 5);
+
+        $before = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $this->assertStringContainsString('→ Item0', $before[0]);
+        $this->assertStringContainsString('Item1', implode("\n", $before));
+        $this->assertStringNotContainsString('Item2', implode("\n", $before));
+
+        $list->handleInput("\x1b[6~");
+
+        $after = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(40, 8)));
+        $visible = implode("\n", $after);
+
+        $this->assertStringContainsString('Item2', $visible, 'PageDown must bring the next unseen option into view.');
+        $this->assertNotSame('v5', $list->getSelectedItem()['value'], 'PageDown must not jump to an option that was never shown.');
+    }
+
+    /**
+     * @return iterable<string, array{0: string, 1: string}>
+     */
+    public static function wrappedAnsiLabelLeakProvider(): iterable
+    {
+        yield 'foreground' => ["\x1b[31m", '31'];
+        yield 'background' => ["\x1b[42m", '42'];
+    }
+
+    #[DataProvider('wrappedAnsiLabelLeakProvider')]
+    public function testWrappedAnsiLabelDoesNotLeakStyleIntoDescriptionCells(string $openCode, string $forbiddenParam)
+    {
+        $label = $openCode.'alpha beta gamma delta epsilon zeta eta theta'."\x1b[39;49m";
+        $list = new SelectListWidget([
+            ['value' => 'a', 'label' => $label, 'description' => 'plain description text here'],
+            ['value' => 'b', 'label' => 'Normal', 'description' => 'Normal'],
+        ]);
+
+        $lines = $list->render(new RenderContext(80, 10));
+        $plain = AnsiUtils::stripAnsiCodes($lines[0]);
+        $descCol = strpos($plain, 'plain');
+        $this->assertNotFalse($descCol);
+
+        $tracker = new AnsiCodeTracker();
+        $activeAtDescription = null;
+        foreach (AnsiUtils::walkCells($lines[0]) as $token) {
+            if (0 === $token['width']) {
+                $tracker->process($token['text']);
+                continue;
+            }
+            if ($token['col'] === $descCol) {
+                $activeAtDescription = $tracker->getActiveCodes();
+                break;
+            }
+        }
+
+        $this->assertNotNull($activeAtDescription);
+        $this->assertSame(
+            "\x1b[1m",
+            $activeAtDescription,
+            \sprintf('Description cells may keep selected bold, but must not keep label SGR param %s (active=%s).', $forbiddenParam, json_encode($activeAtDescription)),
+        );
     }
 
     /**
