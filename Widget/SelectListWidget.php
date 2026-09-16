@@ -51,7 +51,8 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
     private int $selectedIndex = 0;
     private bool $selected = false;
     private bool $verticallyExpanded = true;
-    private int $lastVisibleCount = 0;
+    private int $lastWindowStart = 0;
+    private int $lastWindowEnd = 0;
 
     /**
      * @param list<array{value: string, label: string, description?: string, checked?: bool}> $items
@@ -244,14 +245,14 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             }
 
             if ($kb->matches($data, 'select_page_up') || $kb->matches($data, 'cursor_left')) {
-                $this->selectedIndex = max(0, $this->selectedIndex - $this->pageStep());
+                $this->selectedIndex = $this->pageToIndex(-1);
                 $this->notifySelectionChange();
 
                 return;
             }
 
             if ($kb->matches($data, 'select_page_down') || $kb->matches($data, 'cursor_right')) {
-                $this->selectedIndex = min(\count($this->filteredItemIndices) - 1, $this->selectedIndex + $this->pageStep());
+                $this->selectedIndex = $this->pageToIndex(1);
                 $this->notifySelectionChange();
 
                 return;
@@ -315,7 +316,8 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
         // Items may wrap across several physical rows, so fit the logical
         // window against the context rows before emitting anything.
         [$lines, $startIndex, $endIndex, $indicatorRoom] = $this->renderWindow($startIndex, $endIndex, $context->getRows(), $columns, $labelColumnWidth);
-        $this->lastVisibleCount = max(1, $endIndex - $startIndex);
+        $this->lastWindowStart = $startIndex;
+        $this->lastWindowEnd = $endIndex;
 
         // Add scroll indicator if needed
         if ($indicatorRoom && ($startIndex > 0 || $endIndex < \count($this->filteredItemIndices))) {
@@ -491,7 +493,8 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             $labelRows = TextWrapper::wrapTextWithAnsi($item['label'], $labelWidth);
             $rows = [];
             foreach ($labelRows as $i => $labelRow) {
-                $row = (0 === $i ? $prefix : str_repeat(' ', $prefixWidth)).$labelRow;
+                $content = '' !== $labelRow && null === $selectedStyle ? $this->applyElement('label', $labelRow) : $labelRow;
+                $row = (0 === $i ? $prefix : str_repeat(' ', $prefixWidth)).$content.$this->fieldStyleBoundary($content, $selectedStyle);
                 $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : $row;
             }
 
@@ -509,8 +512,9 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             $rowPrefix = 0 === $i ? $prefix : str_repeat(' ', $prefixWidth);
 
             if ('' === $descriptionRow) {
-                $row = $rowPrefix.$labelRow;
-                $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : ('' !== $labelRow ? $rowPrefix.$this->applyElement('label', $labelRow) : $rowPrefix);
+                $content = '' !== $labelRow && null === $selectedStyle ? $this->applyElement('label', $labelRow) : $labelRow;
+                $row = $rowPrefix.$content.$this->fieldStyleBoundary($content, $selectedStyle);
+                $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : $row;
 
                 continue;
             }
@@ -518,54 +522,66 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             // Pad to the shared label column so descriptions stay aligned
             // across items, matching the previous single-row layout.
             $labelPadding = str_repeat(' ', max(1, $alignedWidth - AnsiUtils::visibleWidth($labelRow)));
-            // Close any label SGR that survived wrapping before the description
-            // column, then restore the enclosing selected style when needed.
-            $labelBoundary = $this->isolateLabelColumn($labelRow, $selectedStyle);
+            $labelContent = '' !== $labelRow && null === $selectedStyle ? $this->applyElement('label', $labelRow) : $labelRow;
+            $labelBoundary = $this->fieldStyleBoundary($labelContent, $selectedStyle);
 
             if (null !== $selectedStyle) {
-                $rows[] = $selectedStyle->apply($rowPrefix.$labelRow.$labelBoundary.$labelPadding.$descriptionRow);
+                $row = $rowPrefix.$labelRow.$labelBoundary.$labelPadding.$descriptionRow;
+                $rows[] = $selectedStyle->apply($row.$this->fieldStyleBoundary($row, $selectedStyle));
 
                 continue;
             }
 
-            $labelText = '' !== $labelRow ? $this->applyElement('label', $labelRow) : '';
             // Keep the inter-column gap outside the description style so the
             // gray color does not paint the alignment spaces.
-            $rows[] = $rowPrefix.$labelText.$this->isolateLabelColumn($labelText, null).$labelPadding.$this->applyElement('description', $descriptionRow);
+            $row = $rowPrefix.$labelContent.$labelBoundary.$labelPadding.$this->applyElement('description', $descriptionRow);
+            $rows[] = $row.$this->fieldStyleBoundary($row, null);
         }
 
         return $rows;
     }
 
     /**
-     * How many logical items Page Up/Down should move.
-     *
-     * Prefer the fitted visible count from the last render. Cap at
-     * maxVisible so a tall viewport cannot jump past the configured page
-     * size. Fall back to maxVisible before the first render.
+     * Move selection to the first item after the fitted window (PageDown)
+     * or the last item before it (PageUp). Fall back to maxVisible steps
+     * before the first render. Clamp at the ends.
      */
-    private function pageStep(): int
+    private function pageToIndex(int $direction): int
     {
-        if ($this->lastVisibleCount > 0) {
-            return max(1, min($this->maxVisible, $this->lastVisibleCount));
+        $last = \count($this->filteredItemIndices) - 1;
+        if ($last <= 0) {
+            return 0;
         }
 
-        return max(1, $this->maxVisible);
+        if ($this->lastWindowEnd > $this->lastWindowStart) {
+            if ($direction > 0) {
+                return min($last, $this->lastWindowEnd);
+            }
+
+            return max(0, $this->lastWindowStart - 1);
+        }
+
+        $step = max(1, $this->maxVisible);
+        if ($direction > 0) {
+            return min($last, $this->selectedIndex + $step);
+        }
+
+        return max(0, $this->selectedIndex - $step);
     }
 
     /**
-     * Close open label SGR before the description column and restore the
-     * enclosing selected style with Style::getAnsiRestore() when present.
-     * Style::apply() re-applies selected backgrounds after full resets.
+     * Close open field-local SGR on an emitted fragment/row and restore the
+     * enclosing selected style when present. Style::apply() re-applies
+     * selected backgrounds after full resets.
      */
-    private function isolateLabelColumn(string $labelText, ?Style $selectedStyle): string
+    private function fieldStyleBoundary(string $text, ?Style $selectedStyle): string
     {
-        if (!str_contains($labelText, "\x1b")) {
+        if (!str_contains($text, "\x1b")) {
             return '';
         }
 
         $tracker = new AnsiCodeTracker();
-        $tracker->processText($labelText);
+        $tracker->processText($text);
         if (!$tracker->hasActiveCodes()) {
             return '';
         }
