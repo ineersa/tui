@@ -21,6 +21,7 @@ use Symfony\Component\Tui\Event\SelectEvent;
 use Symfony\Component\Tui\Event\SelectionChangeEvent;
 use Symfony\Component\Tui\Event\SelectionToggleEvent;
 use Symfony\Component\Tui\Render\RenderContext;
+use Symfony\Component\Tui\Render\Renderer;
 use Symfony\Component\Tui\Style\Direction;
 use Symfony\Component\Tui\Style\Style;
 use Symfony\Component\Tui\Style\StyleSheet;
@@ -427,10 +428,6 @@ class SelectListTest extends TestCase
 
         $lines = $list->render(new RenderContext(60, 10));
 
-        $this->assertCount(3, $lines);
-        $this->assertSame('→ Development  Local development server', AnsiUtils::stripAnsiCodes($lines[0]));
-        $this->assertSame('  Production   Public production server', AnsiUtils::stripAnsiCodes($lines[1]));
-        $this->assertSame('  Normal       Normal', AnsiUtils::stripAnsiCodes($lines[2]));
         $this->assertSame(
             [
                 (new Style())->withBold()->apply('→ Development  Local development server'),
@@ -467,10 +464,15 @@ class SelectListTest extends TestCase
 
         $lines = $list->render(new RenderContext(48, 10));
 
-        $this->assertSame('→ Development         Local development server', AnsiUtils::stripAnsiCodes($lines[0]));
-        $this->assertSame('                      is long', AnsiUtils::stripAnsiCodes($lines[1]));
-        $this->assertSame('  Production is long  Public production server', AnsiUtils::stripAnsiCodes($lines[2]));
-        $this->assertSame('  Normal              Normal', AnsiUtils::stripAnsiCodes($lines[3]));
+        $this->assertSame(
+            [
+                '→ Development         Local development server',
+                '                      is long',
+                '  Production is long  Public production server',
+                '  Normal              Normal',
+            ],
+            array_map(AnsiUtils::stripAnsiCodes(...), $lines),
+        );
         $this->assertStringNotContainsString('(1/', AnsiUtils::stripAnsiCodes(implode("\n", $lines)));
     }
 
@@ -482,9 +484,6 @@ class SelectListTest extends TestCase
 
         $lines = $list->render(new RenderContext(30, 10));
 
-        $this->assertCount(2, $lines);
-        $this->assertSame('→ alpha beta gamma delta', AnsiUtils::stripAnsiCodes($lines[0]));
-        $this->assertSame('  epsilon zeta', AnsiUtils::stripAnsiCodes($lines[1]));
         $this->assertSame(
             [
                 (new Style())->withBold()->apply('→ alpha beta gamma delta'),
@@ -492,23 +491,6 @@ class SelectListTest extends TestCase
             ],
             $lines,
         );
-    }
-
-    public function testWrappedItemsStayAdjacentWithoutBlankRows()
-    {
-        $list = new SelectListWidget([
-            ['value' => 'd', 'label' => 'Development', 'description' => 'Local development server is long'],
-            ['value' => 'p', 'label' => 'Production is long', 'description' => 'Public production server'],
-            ['value' => 'n', 'label' => 'Normal', 'description' => 'Normal'],
-        ]);
-
-        $plain = array_map(AnsiUtils::stripAnsiCodes(...), $list->render(new RenderContext(48, 12)));
-
-        $this->assertSame('→ Development         Local development server', $plain[0]);
-        $this->assertSame('                      is long', $plain[1]);
-        $this->assertSame('  Production is long  Public production server', $plain[2]);
-        $this->assertSame('  Normal              Normal', $plain[3]);
-        $this->assertCount(4, $plain);
     }
 
     public function testMultiselectWrapsWithAlignedContinuationPrefix()
@@ -850,21 +832,8 @@ class SelectListTest extends TestCase
         $plain = AnsiUtils::stripAnsiCodes($lines[0]);
         $descCol = strpos($plain, 'plain');
         $this->assertNotFalse($descCol);
-
-        $tracker = new AnsiCodeTracker();
-        $activeAtDescription = null;
-        foreach (AnsiUtils::walkCells($lines[0]) as $token) {
-            if (0 === $token['width']) {
-                $tracker->process($token['text']);
-                continue;
-            }
-            if ($token['col'] === $descCol) {
-                $activeAtDescription = $tracker->getActiveCodes();
-                break;
-            }
-        }
-
-        $this->assertNotNull($activeAtDescription);
+        $descCol = AnsiUtils::visibleWidth(substr($plain, 0, $descCol));
+        $activeAtDescription = $this->activeCodesAtColumn($lines[0], $descCol);
         $this->assertStringNotContainsString('31', $activeAtDescription);
         $this->assertStringContainsString('1', $activeAtDescription);
         $this->assertStringContainsString('36', $activeAtDescription);
@@ -941,42 +910,19 @@ class SelectListTest extends TestCase
         $root->add($list);
         $root->add($right);
 
-        $terminal = new VirtualTerminal(40, 10);
-        $tui = new Tui(terminal: $terminal);
-        $tui->add($root);
-
-        try {
-            $tui->start();
-            $renderer = (new \ReflectionProperty($tui, 'renderer'))->getValue($tui);
-            $frame = $renderer->renderFrame($root, 40, 10)->toArray();
-        } finally {
-            $tui->stop();
-        }
-
-        $leakedRows = 0;
+        $frame = (new Renderer())->renderFrame($root, 40, 10)->toArray();
+        $checkedRows = 0;
         foreach ($frame as $line) {
             $plain = AnsiUtils::stripAnsiCodes($line);
             if (!str_contains($plain, 'RIGHT')) {
                 continue;
             }
-            $tracker = new AnsiCodeTracker();
-            $activeAtSibling = null;
-            foreach (AnsiUtils::walkCells($line) as $token) {
-                if (0 === $token['width']) {
-                    $tracker->process($token['text']);
-                    continue;
-                }
-                if (20 === $token['col']) {
-                    $activeAtSibling = $tracker->getActiveCodes();
-                    break;
-                }
-            }
-            if (null !== $activeAtSibling && (str_contains($activeAtSibling, '31') || str_contains($activeAtSibling, '42'))) {
-                ++$leakedRows;
-            }
+            ++$checkedRows;
+            $activeAtSibling = $this->activeCodesAtColumn($line, 20);
+            $this->assertStringNotContainsString('31', $activeAtSibling);
+            $this->assertStringNotContainsString('42', $activeAtSibling);
         }
-
-        $this->assertSame(0, $leakedRows, 'Label-only wrapped ANSI must not leak into the right-hand sibling pane.');
+        $this->assertGreaterThan(0, $checkedRows, 'Horizontal sibling pane must be present in the rendered frame.');
     }
 
     public function testDescriptionOnlyContinuationRowsCloseFieldLocalAnsi()
@@ -1021,21 +967,8 @@ class SelectListTest extends TestCase
         $plain = AnsiUtils::stripAnsiCodes($lines[0]);
         $descCol = strpos($plain, 'plain');
         $this->assertNotFalse($descCol);
-
-        $tracker = new AnsiCodeTracker();
-        $activeAtDescription = null;
-        foreach (AnsiUtils::walkCells($lines[0]) as $token) {
-            if (0 === $token['width']) {
-                $tracker->process($token['text']);
-                continue;
-            }
-            if ($token['col'] === $descCol) {
-                $activeAtDescription = $tracker->getActiveCodes();
-                break;
-            }
-        }
-
-        $this->assertNotNull($activeAtDescription);
+        $descCol = AnsiUtils::visibleWidth(substr($plain, 0, $descCol));
+        $activeAtDescription = $this->activeCodesAtColumn($lines[0], $descCol);
         $this->assertSame(
             "\x1b[1m",
             $activeAtDescription,
@@ -1137,5 +1070,21 @@ class SelectListTest extends TestCase
         $tui->add($list);
 
         return [$list, $tui];
+    }
+
+    private function activeCodesAtColumn(string $line, int $column): string
+    {
+        $tracker = new AnsiCodeTracker();
+        foreach (AnsiUtils::walkCells($line) as $token) {
+            if (0 === $token['width']) {
+                $tracker->process($token['text']);
+                continue;
+            }
+            if ($token['col'] === $column) {
+                return $tracker->getActiveCodes();
+            }
+        }
+
+        $this->fail(\sprintf('No visible cell found at column %d in line %s.', $column, json_encode($line)));
     }
 }

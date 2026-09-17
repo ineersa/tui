@@ -301,27 +301,10 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             return $lines;
         }
 
-        // Calculate visible range with scrolling
-        $startIndex = max(
-            0,
-            min(
-                $this->selectedIndex - (int) floor($this->maxVisible / 2),
-                \count($this->filteredItemIndices) - $this->maxVisible,
-            ),
-        );
-        $endIndex = min($startIndex + $this->maxVisible, \count($this->filteredItemIndices));
-
-        // Compute max label width from visible items for alignment
-        $maxLabelWidth = 0;
-        for ($i = $startIndex; $i < $endIndex; ++$i) {
-            $maxLabelWidth = max($maxLabelWidth, AnsiUtils::visibleWidth($this->getFilteredItem($i)['label']));
-        }
-        $labelColumnWidth = min(30, $maxLabelWidth);
-
         // Render visible items
         // Items may wrap across several physical rows, so fit the logical
         // window against the context rows before emitting anything.
-        [$lines, $startIndex, $endIndex, $indicatorRoom] = $this->renderWindow($startIndex, $endIndex, $context->getRows(), $columns, $labelColumnWidth);
+        [$lines, $startIndex, $endIndex, $indicatorRoom] = $this->renderWindow($columns, $context->getRows());
         $this->lastWindowStart = $startIndex;
         $this->lastWindowEnd = $endIndex;
 
@@ -402,8 +385,23 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
      *
      * @return array{0: list<string>, 1: int, 2: int, 3: bool} the rendered rows, the fitted [start, end) range and whether a row is left for the indicator
      */
-    private function renderWindow(int $startIndex, int $endIndex, int $contextRows, int $columns, int $labelColumnWidth): array
+    private function renderWindow(int $columns, int $contextRows): array
     {
+        $startIndex = max(
+            0,
+            min(
+                $this->selectedIndex - (int) floor($this->maxVisible / 2),
+                \count($this->filteredItemIndices) - $this->maxVisible,
+            ),
+        );
+        $endIndex = min($startIndex + $this->maxVisible, \count($this->filteredItemIndices));
+
+        $maxLabelWidth = 0;
+        for ($i = $startIndex; $i < $endIndex; ++$i) {
+            $maxLabelWidth = max($maxLabelWidth, AnsiUtils::visibleWidth($this->getFilteredItem($i)['label']));
+        }
+        $labelColumnWidth = min(30, $maxLabelWidth);
+
         $rowsByIndex = [];
         for ($i = $startIndex; $i < $endIndex; ++$i) {
             $item = $this->getFilteredItem($i);
@@ -496,19 +494,13 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
 
         if (!$showDescription || $descriptionWidth <= 10) {
             $labelWidth = max(1, $columns - $prefixWidth - 2);
-            $labelRows = TextWrapper::wrapTextWithAnsi($item['label'], $labelWidth);
-            $rows = [];
-            foreach ($labelRows as $i => $labelRow) {
-                $content = '' !== $labelRow && null === $selectedStyle ? $this->applyElement('label', $labelRow) : $labelRow;
-                $row = (0 === $i ? $prefix : str_repeat(' ', $prefixWidth)).$content.$this->fieldStyleBoundary($content, $selectedStyle);
-                $rows[] = null !== $selectedStyle ? $selectedStyle->apply($row) : $row;
-            }
-
-            return $rows;
+            $alignedWidth = 0;
+            $descriptionRows = [];
+        } else {
+            $descriptionRows = TextWrapper::wrapTextWithAnsi($description, max(1, $descriptionWidth));
         }
 
         $labelRows = TextWrapper::wrapTextWithAnsi($item['label'], $labelWidth);
-        $descriptionRows = TextWrapper::wrapTextWithAnsi($description, max(1, $descriptionWidth));
         $rowCount = max(\count($labelRows), \count($descriptionRows));
         $rows = [];
 
@@ -621,23 +613,7 @@ class SelectListWidget extends AbstractWidget implements FocusableInterface, Ver
             return;
         }
 
-        $columns = $this->lastRenderColumns;
-        $startIndex = max(
-            0,
-            min(
-                $this->selectedIndex - (int) floor($this->maxVisible / 2),
-                $total - $this->maxVisible,
-            ),
-        );
-        $endIndex = min($startIndex + $this->maxVisible, $total);
-
-        $maxLabelWidth = 0;
-        for ($i = $startIndex; $i < $endIndex; ++$i) {
-            $maxLabelWidth = max($maxLabelWidth, AnsiUtils::visibleWidth($this->getFilteredItem($i)['label']));
-        }
-        $labelColumnWidth = min(30, $maxLabelWidth);
-
-        [, $startIndex, $endIndex] = $this->renderWindow($startIndex, $endIndex, $this->lastRenderRows, $columns, $labelColumnWidth);
+        [, $startIndex, $endIndex] = $this->renderWindow($this->lastRenderColumns, $this->lastRenderRows);
         $this->lastWindowStart = $startIndex;
         $this->lastWindowEnd = $endIndex;
     }
