@@ -679,7 +679,9 @@ class ScreenWriterTest extends TestCase
 
         // The terminal shows the last 5 lines of the content, whatever the shrink removed
         $this->assertSame(\array_slice([...$transcript, ...$shrunk], -5), array_map('rtrim', $screen->getLines()));
+        $this->assertStringNotContainsString("\x1b[2J", $output, 'The viewport should be repainted without clearing the screen');
         $this->assertStringNotContainsString("\x1b[3J", $output, 'Scrollback should be preserved');
+        $this->assertSame(5, substr_count($output, self::CLEAR_LINE));
     }
 
     public function testShrinkingOverflowingContentDoesNotReadUnchangedPrefix()
@@ -720,6 +722,65 @@ class ScreenWriterTest extends TestCase
         yield 'three trailing lines removed' => [['A', 'B', 'C', 'D']];
         yield 'two leading lines removed' => [['C', 'D', 'E', 'F', 'G']];
         yield 'all but one line removed' => [['A']];
+    }
+
+    #[DataProvider('overheightHistoryFrames')]
+    public function testOverheightUpdatesArchiveEachPrefixLineOnce(array $frames, array $expectedHistory, int $rows = 20)
+    {
+        $screen = new ScreenBuffer(100, $rows);
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(100);
+        $terminal->method('getRows')->willReturn($rows);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static fn (string $data) => $screen->write($data));
+        $writer = new ScreenWriter($terminal);
+
+        foreach ($frames as $frame) {
+            $writer->writeFrame(new ArrayLineBuffer($frame));
+
+            $expectedViewport = array_pad(\array_slice($frame, -$rows), $rows, '');
+            $this->assertSame($expectedViewport, array_map(rtrim(...), $screen->getLines()));
+        }
+
+        $this->assertSame($expectedHistory, array_map(rtrim(...), $screen->getScrollback()));
+    }
+
+    public function testFirstOverflowPreservesExistingTerminalOutput()
+    {
+        $screen = new ScreenBuffer(100, 5);
+        $screen->write("shell-1\r\nshell-2\r\n");
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(100);
+        $terminal->method('getRows')->willReturn(5);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static fn (string $data) => $screen->write($data));
+        $writer = new ScreenWriter($terminal);
+
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C']));
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F']));
+
+        $this->assertSame(['B', 'C', 'D', 'E', 'F'], array_map(rtrim(...), $screen->getLines()));
+        $this->assertSame(['shell-1', 'shell-2', 'A'], array_map(rtrim(...), $screen->getScrollback()));
+    }
+
+    public static function overheightHistoryFrames(): iterable
+    {
+        $frame = static function (int $transcriptCount, int $statusCount): array {
+            $transcript = array_map(static fn (int $i): string => \sprintf('Transcript line %02d', $i), range(1, $transcriptCount));
+            $status = $statusCount > 0 ? array_map(static fn (int $i): string => 'Status '.\chr(65 + $i), range(0, $statusCount - 1)) : [];
+
+            return [...$transcript, ...$status];
+        };
+        $history = array_map(static fn (int $i): string => \sprintf('Transcript line %02d', $i), range(1, 4));
+
+        yield 'repeated tail oscillation' => [array_merge(...array_fill(0, 20, [$frame(20, 4), $frame(20, 3)])), $history];
+        yield 'growth crossing the previous maximum' => [[$frame(20, 4), $frame(20, 3), $frame(20, 5)], [...$history, 'Transcript line 05']];
+        yield 'transcript growth mixed with tail changes' => [[$frame(20, 4), $frame(20, 3), $frame(21, 3), $frame(22, 3)], [...$history, 'Transcript line 05']];
+        yield 'shrink below terminal height before regrowth' => [[$frame(20, 4), $frame(10, 0), $frame(20, 3), $frame(20, 7)], [...$history, 'Transcript line 05', 'Transcript line 06', 'Transcript line 07']];
+        yield 'growth by more than one screen' => [[$frame(10, 0), $frame(50, 0)], array_map(static fn (int $i): string => \sprintf('Transcript line %02d', $i), range(1, 30))];
+        yield 'insertion into archived prefix' => [[['A', 'B', 'C', 'D', 'E', 'F'], ['X', 'A', 'B', 'C', 'D', 'E', 'F']], ['X', 'A'], 5];
+        yield 'truncate, replace, and regrow' => [[['A', 'B', 'C', 'D', 'E', 'F'], ['A', 'B', 'C', 'D', 'E'], ['X', 'B', 'C', 'D', 'E'], ['X', 'B', 'C', 'D', 'E', 'F']], ['X'], 5];
+        yield 'same-height edit between shrink and regrowth' => [[['A', 'B', 'C', 'D', 'E', 'F', 'G'], ['A', 'B', 'C', 'D', 'E', 'F'], ['A', 'B', 'C', 'D', 'E', 'F*'], ['A', 'B', 'C', 'D', 'E', 'F*', 'G']], ['A', 'B'], 5];
     }
 
     #[DataProvider('renderPathFrames')]

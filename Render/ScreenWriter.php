@@ -42,6 +42,8 @@ final class ScreenWriter
     private int $previousWidth = 0;
     private int $hardwareCursorRow = 0;
     private int $maxLinesRendered = 0;
+    private int $historyCommittedThrough = 0;
+    private bool $historyInvalidated = false;
     private bool $showHardwareCursor = true;
     private int $scrollOffset = 0;
 
@@ -139,6 +141,8 @@ final class ScreenWriter
         $this->previousWidth = -1; // -1 triggers widthChanged
         $this->hardwareCursorRow = 0;
         $this->maxLinesRendered = 0;
+        $this->historyCommittedThrough = 0;
+        $this->historyInvalidated = false;
     }
 
     /**
@@ -175,13 +179,27 @@ final class ScreenWriter
         }
 
         $lineCount = \count($lines);
+        $previousLineCount = \count($this->previousLines);
+        $previousViewportTop = max(0, $previousLineCount - $rows);
 
-        // Overflowing content that shrinks moves every visible line up, which
-        // cannot be expressed by erasing the trailing ones.
-        if (!$this->terminal->isVirtual() && \count($this->previousLines) > $rows && $lineCount < \count($this->previousLines)) {
-            $this->redrawViewport($lines, $cursorPos, $rows);
+        if (!$this->terminal->isVirtual() && $firstChanged < $this->historyCommittedThrough) {
+            $this->historyInvalidated = true;
+        }
 
-            return;
+        // An overheight frame can move the viewport independently of the
+        // prefix that has already entered native scrollback.
+        if (!$this->terminal->isVirtual() && $lineCount !== $previousLineCount && ($lineCount > $rows || $previousLineCount > $rows)) {
+            if ($lineCount > $previousLineCount && ($this->historyInvalidated || $firstChanged < $previousViewportTop)) {
+                $this->fullRender($lines, $cursorPos, true);
+
+                return;
+            }
+
+            if ($lineCount < $previousLineCount || $previousViewportTop < $this->historyCommittedThrough) {
+                $this->redrawViewport($lines, $cursorPos, $rows);
+
+                return;
+            }
         }
 
         if ($firstChanged >= $lineCount) {
@@ -254,6 +272,8 @@ final class ScreenWriter
         } else {
             $this->maxLinesRendered = max($this->maxLinesRendered, \count($newLines));
         }
+        $this->historyCommittedThrough = $this->terminal->isVirtual() ? 0 : max(0, \count($newLines) - $this->terminal->getRows());
+        $this->historyInvalidated = false;
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
@@ -263,21 +283,40 @@ final class ScreenWriter
     /**
      * Redraws the bottom of the content over the whole screen.
      *
-     * The scrollback is kept, so the lines that scrolled out stay reachable.
+     * Each row is addressed and erased separately. This preserves the scrollback
+     * because terminal multiplexers can archive the viewport on a whole-screen erase.
      *
      * @param array{row: int, col: int, shape: int}|null $cursorPos
      */
     private function redrawViewport(LineBufferInterface $newLines, ?array $cursorPos, int $rows): void
     {
         $lineCount = \count($newLines);
-        $visibleLines = $newLines->slice(max(0, $lineCount - $rows), min($lineCount, $rows));
-        $buffer = "\x1b[?2026h\x1b[?25l\x1b[2J\x1b[H"; // Begin synchronized output with the cursor hidden, clear screen and home
+        $viewportTop = max(0, $lineCount - $rows);
+        $visibleLines = $newLines->slice($viewportTop, min($lineCount, $rows));
+        $buffer = "\x1b[?2026h\x1b[?25l"; // Begin synchronized output with the cursor hidden
 
-        foreach ($visibleLines as $i => $line) {
-            if ($i > 0) {
-                $buffer .= "\r\n";
+        while ($this->historyCommittedThrough < $viewportTop) {
+            $batchSize = min($rows, $viewportTop - $this->historyCommittedThrough);
+
+            for ($i = 0; $i < $batchSize; ++$i) {
+                $buffer .= "\x1b[".($i + 1).";1H\x1b[2K";
+                $buffer .= $this->prepareLine($newLines->getLine($this->historyCommittedThrough + $i));
             }
-            $buffer .= $this->prepareLine($line);
+
+            $buffer .= "\x1b[{$rows};1H".str_repeat("\n", $batchSize);
+            $this->historyCommittedThrough += $batchSize;
+        }
+
+        for ($i = 0; $i < $rows; ++$i) {
+            $buffer .= "\x1b[".($i + 1).";1H\x1b[2K";
+
+            if (isset($visibleLines[$i])) {
+                $buffer .= $this->prepareLine($visibleLines[$i]);
+            }
+        }
+
+        if (\count($visibleLines) < $rows) {
+            $buffer .= "\x1b[".max(1, \count($visibleLines)).';1H';
         }
 
         $this->terminal->write($buffer);
@@ -418,6 +457,7 @@ final class ScreenWriter
 
         $this->hardwareCursorRow = $finalCursorRow;
         $this->maxLinesRendered = max($this->maxLinesRendered, \count($newLines));
+        $this->historyCommittedThrough = $this->terminal->isVirtual() ? 0 : max($this->historyCommittedThrough, \count($newLines) - $this->terminal->getRows());
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
