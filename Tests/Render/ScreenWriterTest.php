@@ -824,12 +824,12 @@ class ScreenWriterTest extends TestCase
             $output .= self::HIDE_CURSOR;
         });
         $writer = new ScreenWriter($terminal);
-        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F', 'G']));
+        $writer->writeFrame(new ArrayLineBuffer(array_map(static fn (int $i): string => 'Old '.$i, range(1, 100))));
         $output = '';
 
-        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F'.AnsiUtils::cursorMarker()]));
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D'.AnsiUtils::cursorMarker(), 'E', 'F', 'G']));
 
-        $this->assertSame(['C', 'D', 'E', 'F', ''], array_map(rtrim(...), $screen->getLines()));
+        $this->assertSame(['C', 'D', 'E', 'F', 'G'], array_map(rtrim(...), $screen->getLines()));
         $this->assertStringContainsString(self::SHOW_CURSOR, $output);
     }
 
