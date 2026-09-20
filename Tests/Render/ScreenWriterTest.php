@@ -845,10 +845,16 @@ class ScreenWriterTest extends TestCase
         $writer = new ScreenWriter($terminal);
         $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F', 'G']));
 
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C']));
         $writer->writeFrame(new ArrayLineBuffer(['A', 'B']));
 
         $this->assertSame(['shell-1', 'shell-2', 'A', 'B'], array_map(rtrim(...), $screen->getScrollback()));
         $this->assertSame(['', '', '', '', ''], array_map(rtrim(...), $screen->getLines()));
+
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D']));
+
+        $this->assertSame(['shell-1', 'shell-2', 'A', 'B'], array_map(rtrim(...), $screen->getScrollback()));
+        $this->assertSame(['C', 'D', '', '', ''], array_map(rtrim(...), $screen->getLines()));
     }
 
     public function testHeightGrowthRevealsPreviouslyHiddenCursor()

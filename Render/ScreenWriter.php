@@ -342,7 +342,10 @@ final class ScreenWriter
         $previousLineCount = \count($this->previousLines ?? throw new LogicException('Previous lines are not available.'));
         $buffer = "\x1b[?2026h\x1b[?25l"; // Begin synchronized output with the cursor hidden
 
-        $targetRow = max(0, \count($newLines) - 1);
+        $newLineCount = \count($newLines);
+        $viewportTop = $this->terminal->isVirtual() ? 0 : $this->historyCommittedThrough;
+        $targetRow = max($viewportTop, $newLineCount - 1);
+        $hasVisibleLines = $newLineCount > $viewportTop;
         $lineDiff = $targetRow - $this->hardwareCursorRow;
 
         if ($lineDiff > 0) {
@@ -361,9 +364,7 @@ final class ScreenWriter
             return;
         }
 
-        $newLineCount = \count($newLines);
-
-        if ($newLineCount > 0) {
+        if ($hasVisibleLines) {
             $buffer .= "\x1b[1B";
         }
 
@@ -374,7 +375,7 @@ final class ScreenWriter
             }
         }
 
-        $moveUp = $extraLines + ($newLineCount > 0 ? 0 : -1);
+        $moveUp = $extraLines + ($hasVisibleLines ? 0 : -1);
         if ($moveUp > 0) {
             $buffer .= "\x1b[{$moveUp}A";
         }
