@@ -805,6 +805,34 @@ class ScreenWriterTest extends TestCase
         $this->assertCount(1, array_keys($combinedRows, 'Transcript line 04', true));
     }
 
+    public function testCursorInRetainedViewportStaysVisibleAfterTailShrink()
+    {
+        $screen = new ScreenBuffer(20, 5);
+        $output = '';
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(20);
+        $terminal->method('getRows')->willReturn(5);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static function (string $data) use ($screen, &$output): void {
+            $screen->write($data);
+            $output .= $data;
+        });
+        $terminal->method('showCursor')->willReturnCallback(static function () use (&$output): void {
+            $output .= self::SHOW_CURSOR;
+        });
+        $terminal->method('hideCursor')->willReturnCallback(static function () use (&$output): void {
+            $output .= self::HIDE_CURSOR;
+        });
+        $writer = new ScreenWriter($terminal);
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F', 'G']));
+        $output = '';
+
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F'.AnsiUtils::cursorMarker()]));
+
+        $this->assertSame(['C', 'D', 'E', 'F', ''], array_map(rtrim(...), $screen->getLines()));
+        $this->assertStringContainsString(self::SHOW_CURSOR, $output);
+    }
+
     public function testFirstOverflowPreservesExistingTerminalOutput()
     {
         $screen = new ScreenBuffer(100, 5);

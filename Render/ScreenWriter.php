@@ -475,7 +475,7 @@ final class ScreenWriter
      */
     private function findCursorPosition(LineBufferInterface $lines, ?int $firstRow = null, ?int $lastRow = null): ?array
     {
-        $firstVisibleRow = $this->terminal->isVirtual() ? 0 : max($this->historyCommittedThrough, \count($lines) - $this->terminal->getRows());
+        $firstVisibleRow = max(0, \count($lines) - $this->terminal->getRows());
         $firstRow = max($firstVisibleRow, $firstRow ?? $firstVisibleRow);
         $lastRow = min(\count($lines) - 1, $lastRow ?? \count($lines) - 1);
 
