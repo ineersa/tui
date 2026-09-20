@@ -40,8 +40,8 @@ final class ScreenWriter
 
     private ?LineBufferInterface $previousLines = null;
     private int $previousWidth = 0;
+    private int $previousHeight = 0;
     private int $hardwareCursorRow = 0;
-    private int $maxLinesRendered = 0;
     private int $historyCommittedThrough = 0;
     private bool $historyInvalidated = false;
     private bool $showHardwareCursor = true;
@@ -115,7 +115,7 @@ final class ScreenWriter
             default => $this->findCursorPosition($lines),
         };
 
-        if (null !== $this->previousLines && $this->previousWidth === $this->terminal->getColumns() && null === $changedRange) {
+        if (null !== $this->previousLines && $this->previousWidth === $this->terminal->getColumns() && $this->previousHeight === $this->terminal->getRows() && null === $changedRange) {
             $this->positionHardwareCursor($cursorPos, \count($lines));
             $this->previousLines = $lines;
             $this->previousCursorPos = $cursorPos;
@@ -139,8 +139,8 @@ final class ScreenWriter
         $this->previousLines = null;
         $this->previousCursorPos = null;
         $this->previousWidth = -1; // -1 triggers widthChanged
+        $this->previousHeight = -1; // -1 triggers heightChanged
         $this->hardwareCursorRow = 0;
-        $this->maxLinesRendered = 0;
         $this->historyCommittedThrough = 0;
         $this->historyInvalidated = false;
     }
@@ -170,10 +170,11 @@ final class ScreenWriter
 
         // Width changed - need full re-render
         $widthChanged = 0 !== $this->previousWidth && $this->previousWidth !== $columns;
+        $heightChanged = 0 !== $this->previousHeight && $this->previousHeight !== $rows;
 
-        // First render or width changed
-        if (null === $this->previousLines || $widthChanged) {
-            $this->fullRender($lines, $cursorPos, $widthChanged);
+        // First render or dimensions changed
+        if (null === $this->previousLines || $widthChanged || $heightChanged) {
+            $this->fullRender($lines, $cursorPos, $widthChanged || $heightChanged);
 
             return;
         }
@@ -186,10 +187,16 @@ final class ScreenWriter
             $this->historyInvalidated = true;
         }
 
+        if (!$this->terminal->isVirtual() && ($this->historyInvalidated || (0 < $this->historyCommittedThrough && $lineCount <= $this->historyCommittedThrough))) {
+            $this->fullRender($lines, $cursorPos, true);
+
+            return;
+        }
+
         // An overheight frame can move the viewport independently of the
         // prefix that has already entered native scrollback.
         if (!$this->terminal->isVirtual() && $lineCount !== $previousLineCount && ($lineCount > $rows || $previousLineCount > $rows)) {
-            if ($lineCount > $previousLineCount && ($this->historyInvalidated || $firstChanged < $previousViewportTop)) {
+            if ($lineCount > $previousLineCount && $firstChanged < $previousViewportTop) {
                 $this->fullRender($lines, $cursorPos, true);
 
                 return;
@@ -209,7 +216,7 @@ final class ScreenWriter
         }
 
         // Check if firstChanged is outside the viewport
-        $viewportTop = $this->terminal->isVirtual() ? 0 : max(0, $this->maxLinesRendered - $rows);
+        $viewportTop = $this->terminal->isVirtual() ? 0 : $this->historyCommittedThrough;
 
         if ($firstChanged < $viewportTop) {
             $this->fullRender($lines, $cursorPos, true);
@@ -267,17 +274,13 @@ final class ScreenWriter
         $this->terminal->write($buffer);
         $this->hardwareCursorRow = max(0, \count($newLines) - 1);
 
-        if ($clear) {
-            $this->maxLinesRendered = \count($newLines);
-        } else {
-            $this->maxLinesRendered = max($this->maxLinesRendered, \count($newLines));
-        }
         $this->historyCommittedThrough = $this->terminal->isVirtual() ? 0 : max(0, \count($newLines) - $this->terminal->getRows());
         $this->historyInvalidated = false;
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
         $this->previousWidth = $this->terminal->getColumns();
+        $this->previousHeight = $this->terminal->getRows();
     }
 
     /**
@@ -291,8 +294,9 @@ final class ScreenWriter
     private function redrawViewport(LineBufferInterface $newLines, ?array $cursorPos, int $rows): void
     {
         $lineCount = \count($newLines);
-        $viewportTop = max(0, $lineCount - $rows);
-        $visibleLines = $newLines->slice($viewportTop, min($lineCount, $rows));
+        $desiredTop = max(0, $lineCount - $rows);
+        $viewportTop = max($this->historyCommittedThrough, $desiredTop);
+        $visibleLines = $newLines->slice($viewportTop, min($lineCount - $viewportTop, $rows));
         $buffer = "\x1b[?2026h\x1b[?25l"; // Begin synchronized output with the cursor hidden
 
         while ($this->historyCommittedThrough < $viewportTop) {
@@ -321,11 +325,11 @@ final class ScreenWriter
 
         $this->terminal->write($buffer);
         $this->hardwareCursorRow = max(0, $lineCount - 1);
-        $this->maxLinesRendered = $lineCount;
 
         $this->positionHardwareCursor($cursorPos, $lineCount);
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
         $this->previousWidth = $this->terminal->getColumns();
+        $this->previousHeight = $this->terminal->getRows();
     }
 
     /**
@@ -379,6 +383,7 @@ final class ScreenWriter
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
         $this->previousWidth = $this->terminal->getColumns();
+        $this->previousHeight = $this->terminal->getRows();
     }
 
     /**
@@ -434,6 +439,7 @@ final class ScreenWriter
                 // since the screen is now in a partially updated state
                 $this->previousLines = null;
                 $this->previousWidth = -1;
+                $this->previousHeight = -1;
 
                 // Strip ANSI codes for readable debug output
                 $plainLine = preg_replace('/\x1b(?:\[[0-9;]*[a-zA-Z]|\][^\x07]*\x07)/', '', $line);
@@ -456,12 +462,12 @@ final class ScreenWriter
         $this->terminal->write($buffer);
 
         $this->hardwareCursorRow = $finalCursorRow;
-        $this->maxLinesRendered = max($this->maxLinesRendered, \count($newLines));
         $this->historyCommittedThrough = $this->terminal->isVirtual() ? 0 : max($this->historyCommittedThrough, \count($newLines) - $this->terminal->getRows());
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
         $this->previousWidth = $this->terminal->getColumns();
+        $this->previousHeight = $this->terminal->getRows();
     }
 
     /**
@@ -469,7 +475,7 @@ final class ScreenWriter
      */
     private function findCursorPosition(LineBufferInterface $lines, ?int $firstRow = null, ?int $lastRow = null): ?array
     {
-        $firstVisibleRow = max(0, \count($lines) - $this->terminal->getRows());
+        $firstVisibleRow = $this->terminal->isVirtual() ? 0 : max($this->historyCommittedThrough, \count($lines) - $this->terminal->getRows());
         $firstRow = max($firstVisibleRow, $firstRow ?? $firstVisibleRow);
         $lastRow = min(\count($lines) - 1, $lastRow ?? \count($lines) - 1);
 
@@ -513,7 +519,7 @@ final class ScreenWriter
      */
     private function positionHardwareCursor(?array $cursorPos, int $totalLines): void
     {
-        if (null === $cursorPos || $totalLines <= 0) {
+        if (null === $cursorPos || $totalLines <= 0 || (!$this->terminal->isVirtual() && $cursorPos['row'] < $this->historyCommittedThrough)) {
             $this->terminal->hideCursor();
 
             return;

@@ -333,6 +333,24 @@ class ScreenWriterTest extends TestCase
         $this->assertStringContainsString('World', $output);
     }
 
+    public function testHeightChangeTriggersFullReRender()
+    {
+        $terminal = new VirtualTerminal(80, 24);
+        $writer = new ScreenWriter($terminal);
+
+        $writer->writeFrame(new ArrayLineBuffer(['Hello', 'World']));
+
+        $terminal->simulateResize(80, 20);
+        $terminal->clearOutput();
+
+        $writer->writeFrame(new ArrayLineBuffer(['Hello', 'World']));
+
+        $output = $terminal->getOutput();
+        $this->assertStringContainsString(self::CLEAR_SCREEN, $output);
+        $this->assertStringContainsString('Hello', $output);
+        $this->assertStringContainsString('World', $output);
+    }
+
     // --- Cursor position extraction ---
 
     public function testCursorMarkerIsDetectedAndStripped()
@@ -654,7 +672,7 @@ class ScreenWriterTest extends TestCase
     }
 
     #[DataProvider('provideShrinkingOverflowingContent')]
-    public function testShrinkingOverflowingContentKeepsTheViewportAtTheBottom(array $shrunk)
+    public function testShrinkingOverflowingContentKeepsCommittedHistoryOutOfTheViewport(array $shrunk, array $expectedViewport, bool $historyRebuilt)
     {
         $transcript = [];
         for ($i = 0; $i < 100; ++$i) {
@@ -677,11 +695,15 @@ class ScreenWriterTest extends TestCase
         $output = '';
         $writer->writeFrame(new ArrayLineBuffer([...$transcript, ...$shrunk]));
 
-        // The terminal shows the last 5 lines of the content, whatever the shrink removed
-        $this->assertSame(\array_slice([...$transcript, ...$shrunk], -5), array_map('rtrim', $screen->getLines()));
-        $this->assertStringNotContainsString("\x1b[2J", $output, 'The viewport should be repainted without clearing the screen');
-        $this->assertStringNotContainsString("\x1b[3J", $output, 'Scrollback should be preserved');
-        $this->assertSame(5, substr_count($output, self::CLEAR_LINE));
+        $this->assertSame($expectedViewport, array_map('rtrim', $screen->getLines()));
+        if ($historyRebuilt) {
+            $this->assertStringContainsString(self::CLEAR_SCREEN, $output, 'A changed committed prefix requires rebuilding native history');
+            $this->assertSame(0, substr_count($output, self::CLEAR_LINE));
+        } else {
+            $this->assertStringNotContainsString("\x1b[2J", $output, 'Stable committed history should be preserved');
+            $this->assertStringNotContainsString("\x1b[3J", $output, 'Stable committed history should be preserved');
+            $this->assertSame(5, substr_count($output, self::CLEAR_LINE));
+        }
     }
 
     public function testShrinkingOverflowingContentDoesNotReadUnchangedPrefix()
@@ -718,10 +740,10 @@ class ScreenWriterTest extends TestCase
 
     public static function provideShrinkingOverflowingContent(): iterable
     {
-        yield 'one trailing line removed' => [['A', 'B', 'C', 'D', 'E', 'F']];
-        yield 'three trailing lines removed' => [['A', 'B', 'C', 'D']];
-        yield 'two leading lines removed' => [['C', 'D', 'E', 'F', 'G']];
-        yield 'all but one line removed' => [['A']];
+        yield 'one trailing line removed' => [['A', 'B', 'C', 'D', 'E', 'F'], ['C', 'D', 'E', 'F', ''], false];
+        yield 'three trailing lines removed' => [['A', 'B', 'C', 'D'], ['C', 'D', '', '', ''], false];
+        yield 'two committed lines removed' => [['C', 'D', 'E', 'F', 'G'], ['C', 'D', 'E', 'F', 'G'], true];
+        yield 'all but one line removed' => [['A'], ['transcript 96', 'transcript 97', 'transcript 98', 'transcript 99', 'A'], true];
     }
 
     #[DataProvider('overheightHistoryFrames')]
@@ -738,11 +760,49 @@ class ScreenWriterTest extends TestCase
         foreach ($frames as $frame) {
             $writer->writeFrame(new ArrayLineBuffer($frame));
 
-            $expectedViewport = array_pad(\array_slice($frame, -$rows), $rows, '');
-            $this->assertSame($expectedViewport, array_map(rtrim(...), $screen->getLines()));
+            $combinedRows = array_values(array_filter(
+                array_map(rtrim(...), [...$screen->getScrollback(), ...$screen->getLines()]),
+                static fn (string $line): bool => '' !== $line,
+            ));
+            $this->assertSame($frame, $combinedRows);
         }
 
         $this->assertSame($expectedHistory, array_map(rtrim(...), $screen->getScrollback()));
+    }
+
+    public function testTailOscillationAndFollowingOutputDoNotDuplicateBoundaryRows()
+    {
+        $screen = new ScreenBuffer(100, 20);
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(100);
+        $terminal->method('getRows')->willReturn(20);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static fn (string $data) => $screen->write($data));
+        $writer = new ScreenWriter($terminal);
+        $transcript = array_map(static fn (int $i): string => \sprintf('Transcript line %02d', $i), range(1, 20));
+        $longFrame = [...$transcript, 'Status A', 'Status B', 'Status C', 'Status D'];
+        $shortFrame = [...$transcript, 'Status A', 'Status B', 'Status C'];
+
+        for ($cycle = 0; $cycle < 20; ++$cycle) {
+            foreach ([$longFrame, $shortFrame] as $frame) {
+                $writer->writeFrame(new ArrayLineBuffer($frame));
+                $combinedRows = array_values(array_filter(
+                    array_map(rtrim(...), [...$screen->getScrollback(), ...$screen->getLines()]),
+                    static fn (string $line): bool => '' !== $line,
+                ));
+                $this->assertSame($frame, $combinedRows);
+            }
+        }
+
+        $completion = 'Reproduction complete. Enter tmux copy mode and inspect the history.';
+        $screen->write("\r\n{$completion}\r\n");
+        $combinedRows = array_values(array_filter(
+            array_map(rtrim(...), [...$screen->getScrollback(), ...$screen->getLines()]),
+            static fn (string $line): bool => '' !== $line,
+        ));
+
+        $this->assertSame([...$shortFrame, $completion], $combinedRows);
+        $this->assertCount(1, array_keys($combinedRows, 'Transcript line 04', true));
     }
 
     public function testFirstOverflowPreservesExistingTerminalOutput()
