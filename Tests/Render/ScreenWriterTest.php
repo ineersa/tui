@@ -833,6 +833,54 @@ class ScreenWriterTest extends TestCase
         $this->assertStringContainsString(self::SHOW_CURSOR, $output);
     }
 
+    public function testDeepTailShrinkPreservesPreExistingTerminalHistory()
+    {
+        $screen = new ScreenBuffer(20, 5);
+        $screen->write("shell-1\r\nshell-2\r\n");
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(20);
+        $terminal->method('getRows')->willReturn(5);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static fn (string $data) => $screen->write($data));
+        $writer = new ScreenWriter($terminal);
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B', 'C', 'D', 'E', 'F', 'G']));
+
+        $writer->writeFrame(new ArrayLineBuffer(['A', 'B']));
+
+        $this->assertSame(['shell-1', 'shell-2', 'A', 'B'], array_map(rtrim(...), $screen->getScrollback()));
+        $this->assertSame(['', '', '', '', ''], array_map(rtrim(...), $screen->getLines()));
+    }
+
+    public function testHeightGrowthRevealsPreviouslyHiddenCursor()
+    {
+        $rows = 3;
+        $output = '';
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(20);
+        $terminal->method('getRows')->willReturnCallback(static function () use (&$rows): int {
+            return $rows;
+        });
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static function (string $data) use (&$output): void {
+            $output .= $data;
+        });
+        $terminal->method('showCursor')->willReturnCallback(static function () use (&$output): void {
+            $output .= self::SHOW_CURSOR;
+        });
+        $terminal->method('hideCursor')->willReturnCallback(static function () use (&$output): void {
+            $output .= self::HIDE_CURSOR;
+        });
+        $frame = new ArrayLineBuffer(['A', 'B', 'C'.AnsiUtils::cursorMarker(), 'D', 'E', 'F']);
+        $writer = new ScreenWriter($terminal);
+        $writer->writeFrame($frame);
+        $output = '';
+        $rows = 6;
+
+        $writer->writeFrame($frame);
+
+        $this->assertStringContainsString(self::SHOW_CURSOR, $output);
+    }
+
     public function testFirstOverflowPreservesExistingTerminalOutput()
     {
         $screen = new ScreenBuffer(100, 5);

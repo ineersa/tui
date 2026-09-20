@@ -108,8 +108,10 @@ final class ScreenWriter
         }
 
         $changedRange = null === $this->previousLines ? null : $this->lineBufferDiffer->findChangedRange($lines, $this->previousLines);
+        $heightChanged = null !== $this->previousLines && $this->previousHeight !== $this->terminal->getRows();
         $cursorPos = match (true) {
             null === $this->previousLines => $this->findCursorPosition($lines),
+            $heightChanged => $this->findCursorPosition($lines),
             null === $changedRange => $this->previousCursorPos,
             null === $this->previousCursorPos && \count($lines) === \count($this->previousLines) => $this->findCursorPosition($lines, $changedRange['first'], $changedRange['last']),
             default => $this->findCursorPosition($lines),
@@ -187,7 +189,7 @@ final class ScreenWriter
             $this->historyInvalidated = true;
         }
 
-        if (!$this->terminal->isVirtual() && ($this->historyInvalidated || (0 < $this->historyCommittedThrough && $lineCount <= $this->historyCommittedThrough))) {
+        if (!$this->terminal->isVirtual() && $this->historyInvalidated) {
             $this->fullRender($lines, $cursorPos, true);
 
             return;
@@ -324,7 +326,7 @@ final class ScreenWriter
         }
 
         $this->terminal->write($buffer);
-        $this->hardwareCursorRow = max(0, $lineCount - 1);
+        $this->hardwareCursorRow = max($viewportTop, $lineCount - 1);
 
         $this->positionHardwareCursor($cursorPos, $lineCount);
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
