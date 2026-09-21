@@ -43,7 +43,6 @@ final class ScreenWriter
     private int $previousHeight = 0;
     private int $hardwareCursorRow = 0;
     private int $historyCommittedThrough = 0;
-    private bool $historyInvalidated = false;
     private bool $showHardwareCursor = true;
     private int $scrollOffset = 0;
 
@@ -144,7 +143,6 @@ final class ScreenWriter
         $this->previousHeight = -1; // -1 triggers heightChanged
         $this->hardwareCursorRow = 0;
         $this->historyCommittedThrough = 0;
-        $this->historyInvalidated = false;
     }
 
     /**
@@ -182,40 +180,14 @@ final class ScreenWriter
         }
 
         $lineCount = \count($lines);
-        $previousLineCount = \count($this->previousLines);
-        $previousViewportTop = max(0, $previousLineCount - $rows);
-
         if (!$this->terminal->isVirtual() && $firstChanged < $this->historyCommittedThrough) {
-            $this->historyInvalidated = true;
-        }
-
-        if (!$this->terminal->isVirtual() && $this->historyInvalidated) {
             $this->fullRender($lines, $cursorPos, true);
 
             return;
-        }
-
-        // An overheight frame can move the viewport independently of the
-        // prefix that has already entered native scrollback.
-        if (!$this->terminal->isVirtual() && $lineCount !== $previousLineCount && ($lineCount > $rows || $previousLineCount > $rows)) {
-            if ($lineCount > $previousLineCount && $firstChanged < $previousViewportTop) {
-                $this->fullRender($lines, $cursorPos, true);
-
-                return;
-            }
         }
 
         if ($firstChanged >= $lineCount) {
             $this->handleDeletedLines($lines, $cursorPos, $rows);
-
-            return;
-        }
-
-        // Check if firstChanged is outside the viewport
-        $viewportTop = $this->terminal->isVirtual() ? 0 : $this->historyCommittedThrough;
-
-        if ($firstChanged < $viewportTop) {
-            $this->fullRender($lines, $cursorPos, true);
 
             return;
         }
@@ -271,7 +243,6 @@ final class ScreenWriter
         $this->hardwareCursorRow = max(0, \count($newLines) - 1);
 
         $this->historyCommittedThrough = $this->terminal->isVirtual() ? 0 : max(0, \count($newLines) - $this->terminal->getRows());
-        $this->historyInvalidated = false;
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together

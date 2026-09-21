@@ -905,6 +905,43 @@ class ScreenWriterTest extends TestCase
         $this->assertSame(['shell-1', 'shell-2', 'A'], array_map(rtrim(...), $screen->getScrollback()));
     }
 
+    public function testAutocompleteShrinkUsesDifferentialUpdatesWithoutStaleRows()
+    {
+        $screen = new ScreenBuffer(40, 8);
+        $screen->write("shell-1\r\nshell-2\r\n");
+        $output = '';
+        $terminal = $this->createStub(TerminalInterface::class);
+        $terminal->method('getColumns')->willReturn(40);
+        $terminal->method('getRows')->willReturn(8);
+        $terminal->method('isVirtual')->willReturn(false);
+        $terminal->method('write')->willReturnCallback(static function (string $data) use ($screen, &$output): void {
+            $screen->write($data);
+            $output .= $data;
+        });
+        $writer = new ScreenWriter($terminal);
+        $transcript = array_map(static fn (int $i): string => 'Transcript '.$i, range(1, 8));
+        $marker = AnsiUtils::cursorMarker();
+        $frames = [
+            [[...$transcript, 'editor-v1'.$marker, 'footer-v1'], ['shell-1', 'shell-2', 'Transcript 1', 'Transcript 2'], ['Transcript 3', 'Transcript 4', 'Transcript 5', 'Transcript 6', 'Transcript 7', 'Transcript 8', 'editor-v1', 'footer-v1'], 6],
+            [[...$transcript, 'editor-v2'.$marker, 'completion-1', 'completion-2', 'completion-3', 'footer-v2'], ['shell-1', 'shell-2', 'Transcript 1', 'Transcript 2', 'Transcript 3', 'Transcript 4', 'Transcript 5'], ['Transcript 6', 'Transcript 7', 'Transcript 8', 'editor-v2', 'completion-1', 'completion-2', 'completion-3', 'footer-v2'], 3],
+            [[...$transcript, 'editor-v3'.$marker, 'completion-1', 'footer-v3'], ['shell-1', 'shell-2', 'Transcript 1', 'Transcript 2', 'Transcript 3', 'Transcript 4', 'Transcript 5'], ['Transcript 6', 'Transcript 7', 'Transcript 8', 'editor-v3', 'completion-1', 'footer-v3', '', ''], 3],
+            [[...$transcript, 'editor-v4'.$marker, 'footer-v4'], ['shell-1', 'shell-2', 'Transcript 1', 'Transcript 2', 'Transcript 3', 'Transcript 4', 'Transcript 5'], ['Transcript 6', 'Transcript 7', 'Transcript 8', 'editor-v4', 'footer-v4', '', '', ''], 3],
+        ];
+
+        foreach ($frames as $index => [$frame, $expectedHistory, $expectedViewport, $expectedCursorRow]) {
+            $output = '';
+            $writer->writeFrame(new ArrayLineBuffer($frame));
+
+            $this->assertSame($expectedHistory, array_map(rtrim(...), $screen->getScrollback()));
+            $this->assertSame($expectedViewport, array_map(rtrim(...), $screen->getLines()));
+            $this->assertSame($expectedCursorRow, (new \ReflectionProperty($screen, 'cursorRow'))->getValue($screen));
+            $this->assertSame(9, (new \ReflectionProperty($screen, 'cursorCol'))->getValue($screen));
+            if ($index > 0) {
+                $this->assertLessThan(8, substr_count($output, self::CLEAR_LINE), 'Autocomplete updates must not repaint the entire viewport.');
+            }
+        }
+    }
+
     public static function overheightHistoryFrames(): iterable
     {
         $frame = static function (int $transcriptCount, int $statusCount): array {
