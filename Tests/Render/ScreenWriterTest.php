@@ -672,7 +672,7 @@ class ScreenWriterTest extends TestCase
     }
 
     #[DataProvider('provideShrinkingOverflowingContent')]
-    public function testShrinkingOverflowingContentKeepsCommittedHistoryOutOfTheViewport(array $shrunk, array $expectedViewport, bool $historyRebuilt)
+    public function testShrinkingOverflowingContentKeepsCommittedHistoryOutOfTheViewport(array $shrunk, array $expectedViewport, bool $historyRebuilt, int $expectedClearLines)
     {
         $transcript = [];
         for ($i = 0; $i < 100; ++$i) {
@@ -702,7 +702,7 @@ class ScreenWriterTest extends TestCase
         } else {
             $this->assertStringNotContainsString("\x1b[2J", $output, 'Stable committed history should be preserved');
             $this->assertStringNotContainsString("\x1b[3J", $output, 'Stable committed history should be preserved');
-            $this->assertSame(5, substr_count($output, self::CLEAR_LINE));
+            $this->assertSame($expectedClearLines, substr_count($output, self::CLEAR_LINE));
         }
     }
 
@@ -740,10 +740,10 @@ class ScreenWriterTest extends TestCase
 
     public static function provideShrinkingOverflowingContent(): iterable
     {
-        yield 'one trailing line removed' => [['A', 'B', 'C', 'D', 'E', 'F'], ['C', 'D', 'E', 'F', ''], false];
-        yield 'three trailing lines removed' => [['A', 'B', 'C', 'D'], ['C', 'D', '', '', ''], false];
-        yield 'two committed lines removed' => [['C', 'D', 'E', 'F', 'G'], ['C', 'D', 'E', 'F', 'G'], true];
-        yield 'all but one line removed' => [['A'], ['transcript 96', 'transcript 97', 'transcript 98', 'transcript 99', 'A'], true];
+        yield 'one trailing line removed' => [['A', 'B', 'C', 'D', 'E', 'F'], ['C', 'D', 'E', 'F', ''], false, 1];
+        yield 'three trailing lines removed' => [['A', 'B', 'C', 'D'], ['C', 'D', '', '', ''], false, 3];
+        yield 'two committed lines removed' => [['C', 'D', 'E', 'F', 'G'], ['C', 'D', 'E', 'F', 'G'], true, 0];
+        yield 'all but one line removed' => [['A'], ['transcript 96', 'transcript 97', 'transcript 98', 'transcript 99', 'A'], true, 0];
     }
 
     #[DataProvider('overheightHistoryFrames')]

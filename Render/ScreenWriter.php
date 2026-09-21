@@ -203,12 +203,6 @@ final class ScreenWriter
 
                 return;
             }
-
-            if ($lineCount < $previousLineCount || $previousViewportTop < $this->historyCommittedThrough) {
-                $this->redrawViewport($lines, $cursorPos, $rows);
-
-                return;
-            }
         }
 
         if ($firstChanged >= $lineCount) {
@@ -280,55 +274,6 @@ final class ScreenWriter
         $this->historyInvalidated = false;
 
         $this->positionHardwareCursor($cursorPos, \count($newLines));
-        $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
-        $this->previousWidth = $this->terminal->getColumns();
-        $this->previousHeight = $this->terminal->getRows();
-    }
-
-    /**
-     * Redraws the bottom of the content over the whole screen.
-     *
-     * Each row is addressed and erased separately. This preserves the scrollback
-     * because terminal multiplexers can archive the viewport on a whole-screen erase.
-     *
-     * @param array{row: int, col: int, shape: int}|null $cursorPos
-     */
-    private function redrawViewport(LineBufferInterface $newLines, ?array $cursorPos, int $rows): void
-    {
-        $lineCount = \count($newLines);
-        $desiredTop = max(0, $lineCount - $rows);
-        $viewportTop = max($this->historyCommittedThrough, $desiredTop);
-        $visibleLines = $newLines->slice($viewportTop, min($lineCount - $viewportTop, $rows));
-        $buffer = "\x1b[?2026h\x1b[?25l"; // Begin synchronized output with the cursor hidden
-
-        while ($this->historyCommittedThrough < $viewportTop) {
-            $batchSize = min($rows, $viewportTop - $this->historyCommittedThrough);
-
-            for ($i = 0; $i < $batchSize; ++$i) {
-                $buffer .= "\x1b[".($i + 1).";1H\x1b[2K";
-                $buffer .= $this->prepareLine($newLines->getLine($this->historyCommittedThrough + $i));
-            }
-
-            $buffer .= "\x1b[{$rows};1H".str_repeat("\n", $batchSize);
-            $this->historyCommittedThrough += $batchSize;
-        }
-
-        for ($i = 0; $i < $rows; ++$i) {
-            $buffer .= "\x1b[".($i + 1).";1H\x1b[2K";
-
-            if (isset($visibleLines[$i])) {
-                $buffer .= $this->prepareLine($visibleLines[$i]);
-            }
-        }
-
-        if (\count($visibleLines) < $rows) {
-            $buffer .= "\x1b[".max(1, \count($visibleLines)).';1H';
-        }
-
-        $this->terminal->write($buffer);
-        $this->hardwareCursorRow = max($viewportTop, $lineCount - 1);
-
-        $this->positionHardwareCursor($cursorPos, $lineCount);
         $this->terminal->write("\x1b[?2026l"); // Publish the content and the restored cursor together
         $this->previousWidth = $this->terminal->getColumns();
         $this->previousHeight = $this->terminal->getRows();
